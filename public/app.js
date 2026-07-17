@@ -907,8 +907,20 @@ function renderFinale(s) {
         ? 'Connected — full tracks with DJ fades if this account has Premium; otherwise falls back to preview players.'
         : 'Tip for the DJ laptop: Connect Spotify (top right) for full-track playback with volume fades. Without it, preview clips with hard cuts.'}</p>
       ${s.playlistUrl
-        ? `<p class="center"><a id="playlist-link" class="btn small ghost" href="${esc(s.playlistUrl)}" target="_blank" rel="noopener">🔗 Open the winners playlist</a></p>`
-        : spotify.connected ? '<p class="center"><button id="playlist-btn" class="btn small ghost">➕ Create Spotify playlist</button></p>' : ''}
+        ? `<p class="center"><a id="playlist-link" class="btn small ghost" href="${esc(s.playlistUrl)}" target="_blank" rel="noopener">🔗 Open the game playlist</a></p>`
+        : spotify.connected ? `<p class="center"><button id="playlist-btn" class="btn small ghost">➕ Create Spotify playlist${(s.allSongs || []).length ? ` (all ${(s.allSongs || []).filter((a) => a.track.id).length} songs)` : ''}</button></p>` : ''}
+      ${(s.allSongs || []).length ? `
+        <details id="all-songs">
+          <summary>All submissions (${s.allSongs.length})</summary>
+          ${s.allSongs.map((a) => `
+            <div class="track-row">
+              ${a.track.image ? `<img src="${esc(a.track.image)}" alt="">` : '<div class="art-ph">🎵</div>'}
+              <div class="tmeta">
+                <b>${a.winner ? '🏆 ' : ''}${trackLabel(a.track)}</b>
+                <span class="muted">Round ${a.round} · ${esc(a.category)} · ${esc(a.by)}</span>
+              </div>
+            </div>`).join('')}
+        </details>` : ''}
       <div id="mix-embed" class="hidden"></div>
     </div>`;
   const plb = $('#playlist-btn');
@@ -932,7 +944,16 @@ function renderFinale(s) {
 
 // Create a real Spotify playlist of the round winners and share its URL with the room.
 async function createFinalPlaylist(list) {
-  const uris = list.filter((h) => h.track.id).map((h) => 'spotify:track:' + h.track.id);
+  // Every submission from every round (winners first within each round);
+  // fall back to just the winners for games recorded before allSongs existed.
+  const source = (state && state.allSongs && state.allSongs.length)
+    ? [...state.allSongs].sort((a, b) => a.round - b.round || (b.winner ? 1 : 0) - (a.winner ? 1 : 0))
+    : list;
+  const seen = new Set();
+  const uris = [];
+  for (const a of source) {
+    if (a.track.id && !seen.has(a.track.id)) { seen.add(a.track.id); uris.push('spotify:track:' + a.track.id); }
+  }
   if (!uris.length) return toast('No Spotify tracks in the setlist');
   const btn = $('#playlist-btn');
   if (btn) { btn.disabled = true; btn.textContent = 'Creating…'; }
@@ -940,7 +961,7 @@ async function createFinalPlaylist(list) {
     const me = await spotify.call('/me');
     const pl = await spotify.post(`/users/${encodeURIComponent(me.id)}/playlists`, {
       name: 'Song Showdown — ' + new Date().toLocaleDateString(),
-      description: 'Round winners: ' + list.map((h) => h.category).join(' · '),
+      description: `${uris.length} songs from ${list.length} rounds · ` + list.map((h) => h.category).join(' · '),
       public: true,
     });
     await spotify.post(`/playlists/${pl.id}/tracks`, { uris });

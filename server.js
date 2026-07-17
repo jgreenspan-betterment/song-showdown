@@ -57,6 +57,7 @@ function newGame(players = []) {
     order: [], // shuffled sids for anonymous display
     winner: null, // {sid, playerId} — never sent to clients directly
     history: [], // {round, category, track, votes}
+    allSongs: [], // every submission from every finished round
     playlistUrl: null, // Spotify playlist of the winners (host-created)
     adminSpotifyId: null, // Spotify user id that owns admin (set on first verified claim)
   };
@@ -125,6 +126,10 @@ function finishRound() {
   game.revealed = false;
   game.tally = tally;
   game.history.push({ round: game.round, category: game.category, track: w.track, votes: best, by: (player(w.playerId) || {}).name || '?', tie: winners.length > 1 });
+  game.allSongs = (game.allSongs || []).concat(game.submissions.map(s => ({
+    round: game.round, category: game.category, track: s.track,
+    by: (player(s.playerId) || {}).name || '?', winner: s.sid === w.sid,
+  })));
   game.phase = 'results';
 }
 
@@ -189,6 +194,7 @@ function publicState(pid) {
   }
   if (game.phase === 'finale') {
     st.playlistUrl = game.playlistUrl || null;
+    st.allSongs = game.allSongs || [];
   }
   if (game.phase === 'results') {
     st.youWon = !!(game.winner && game.winner.playerId === pid);
