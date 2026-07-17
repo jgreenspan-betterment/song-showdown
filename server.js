@@ -322,6 +322,20 @@ const api = {
     return { ok: true, account: d.display_name || d.id };
   },
 
+  'POST /api/clear-players': (q, body) => {
+    const me = player(body.playerId);
+    if (!me || !me.isHost) throw { code: 403, msg: 'Host only' };
+    game.players = game.players.filter(p => p.id === me.id);
+    game.submissions = game.submissions.filter(s => s.playerId === me.id);
+    game.order = game.order.filter(sid => game.submissions.some(s => s.sid === sid));
+    const myVote = game.votes[me.id];
+    game.votes = {};
+    if (myVote && game.submissions.some(s => s.sid === myVote)) game.votes[me.id] = myVote;
+    if (game.pickerId && !player(game.pickerId)) game.pickerId = me.id;
+    bump();
+    return { ok: true };
+  },
+
   'POST /api/kick': (q, body) => {
     const me = player(body.playerId);
     if (!me || !me.isHost) throw { code: 403, msg: 'Host only' };

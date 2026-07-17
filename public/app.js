@@ -264,12 +264,16 @@ function renderAdminPanel(s) {
   if (s.history.length && s.phase !== 'finale') html += '<button id="finale-btn" class="btn small ghost">🎬 End game — Final Mix</button>';
   if (s.phase === 'finale') html += '<button id="admin-next" class="btn small ghost">▶ Keep playing — next round</button>';
   if (s.phase !== 'lobby') html += '<button id="reset-btn" class="btn small danger">Reset game</button>';
+  html += '<button id="clear-players-btn" class="btn small danger">👥 Remove all players</button>';
   $('#ap-actions').innerHTML = html || '<p class="muted">Lobby — start the game from the main card, or add test players below.</p>';
 
   const bk = $('#tt-back');
   if (bk) bk.onclick = () => { setImpersonate(null); toast('Back to yourself ✓', false); };
   const f = $('#force-btn');
   if (f) f.onclick = () => confirm('Skip stragglers and move to the next phase?') && api('/api/force', { playerId: store.playerId }).then(poll).catch((e) => toast(e.message));
+  const cp = $('#clear-players-btn');
+  if (cp) cp.onclick = () => confirm('Remove ALL players except you? (open tabs will auto-rejoin)') &&
+    api('/api/clear-players', { playerId: store.playerId }).then(() => { testStore.ids = []; return poll(); }).catch((e) => toast(e.message));
   const r = $('#reset-btn');
   if (r) r.onclick = () => confirm('Reset the whole game? (players stay)') && api('/api/reset', { playerId: store.playerId }).then(() => { renderedKey = ''; return poll(); }).catch((e) => toast(e.message));
   const an = $('#admin-next');
