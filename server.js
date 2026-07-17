@@ -369,6 +369,31 @@ const api = {
     return { ok: true };
   },
 
+  'POST /api/restore': (q, body) => {
+    if (game.round !== 0 || game.history.length || game.phase !== 'lobby') throw { code: 409, msg: 'Game already in progress' };
+    if (!Array.isArray(body.history) || !body.history.length || body.history.length > 50) throw { code: 400, msg: 'Nothing to restore' };
+    game.history = body.history.slice(0, 50).map(h => ({
+      round: Math.max(1, Math.min(99, Math.round(+h.round) || 1)),
+      category: String(h.category || '').slice(0, 80),
+      track: cleanTrack(h.track) || { manual: 'unknown' },
+      votes: Math.max(0, Math.min(99, Math.round(+h.votes) || 0)),
+      by: String(h.by || '?').slice(0, 24),
+      tie: !!h.tie,
+    }));
+    game.allSongs = Array.isArray(body.allSongs) ? body.allSongs.slice(0, 300).map(a => ({
+      round: Math.max(1, Math.min(99, Math.round(+a.round) || 1)),
+      category: String(a.category || '').slice(0, 80),
+      track: cleanTrack(a.track) || { manual: 'unknown' },
+      by: String(a.by || '?').slice(0, 24),
+      winner: !!a.winner,
+    })) : [];
+    game.round = game.history[game.history.length - 1].round;
+    game.revealed = true;
+    game.phase = 'finale';
+    bump();
+    return { ok: true, restored: game.history.length };
+  },
+
   'POST /api/playlist': (q, body) => {
     const me = player(body.playerId);
     if (!me || !me.isHost) throw { code: 403, msg: 'Host only' };

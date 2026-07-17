@@ -196,8 +196,8 @@ summary:hover { color: #fff; }
 .song-card.winner .vote-count { color: var(--gold); }
 .mix-art { width: 48px; height: 48px; border-radius: 4px; flex-shrink: 0; }
 .mix-round {
-  min-width: 64px; text-align: center; color: var(--green);
-  font-weight: 900; font-size: 13px; line-height: 1.2;
+  min-width: 84px; max-width: 110px; text-align: center; color: var(--green);
+  font-weight: 900; font-size: 13px; line-height: 1.25; flex-shrink: 0;
 }
 .result-row a { color: var(--text); text-decoration: none; }
 .result-row a:hover { text-decoration: underline; }
