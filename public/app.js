@@ -878,10 +878,10 @@ function renderFinale(s) {
         ${list.map((h, i) => `
           <div class="song-card" id="mix-${i}">
             <div class="result-row">
-              <span class="vote-count">${i + 1}</span>
+              <span class="mix-round">Round ${h.round}</span>
               <div class="tmeta">
                 <b>${trackLabel(h.track)}</b>
-                <span class="muted">R${h.round} · ${esc(h.category)}${h.by ? ` · ${esc(h.by)}` : ''}${h.track.id ? ` · starts ${fmtTime(snippetStart(h.track))} · auto-fade` : ' · manual entry — skipped in playback'}</span>
+                <span class="muted">${esc(h.category)}${h.by ? ` · ${esc(h.by)}` : ''}${h.track.id ? ` · starts ${fmtTime(snippetStart(h.track))} · auto-fade` : ' · manual entry — skipped in playback'}</span>
               </div>
             </div>
           </div>`).join('')}
