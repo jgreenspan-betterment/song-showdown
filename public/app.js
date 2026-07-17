@@ -166,6 +166,15 @@ async function poll() {
       state = null; renderedKey = '';
       return;
     }
+    if (s.you) localStorage.setItem('ssg_wipe', String(s.wipe || 0));
+    // Host wiped the lobby: drop our identity and show the join screen.
+    if (store.playerId && !s.you && (s.wipe || 0) > +(localStorage.getItem('ssg_wipe') || 0)) {
+      store.playerId = null;
+      localStorage.setItem('ssg_wipe', String(s.wipe || 0));
+      toast('The host reset the player list — join again to play', false);
+      state = null; renderedKey = '';
+      return;
+    }
     // Server restarted / lost our player: rejoin with the saved name.
     if (store.playerId && !s.you && store.name) {
       const j = await api('/api/join', { name: store.name, playerId: store.playerId });
@@ -765,10 +774,14 @@ function wireSnippets() {
   let ready = false;
 
   const fallback = () => {
-    root().querySelectorAll('.embed-slot').forEach((el) => {
+    // Only touch the slots captured by THIS call — a stale timer from a previous
+    // screen must not convert or strip controls on the current one.
+    const sids = new Set(slots.map((el) => el.dataset.sid));
+    slots.forEach((el) => {
+      if (!document.contains(el)) return;
       el.outerHTML = `<iframe src="https://open.spotify.com/embed/track/${esc(el.dataset.tid)}" width="100%" height="80" frameborder="0" loading="lazy" allow="encrypted-media"></iframe>`;
     });
-    root().querySelectorAll('.snip-btn').forEach((b) => b.remove());
+    document.querySelectorAll('.snip-btn').forEach((b) => { if (sids.has(b.dataset.sid)) b.remove(); });
   };
 
   ensureEmbedApi((api) => {
@@ -827,11 +840,12 @@ function renderResults(s) {
             <div class="result-row">
               <span class="vote-count">${song.votes}</span>
               <div class="tmeta">
-                ${song.winner ? '🏆 ' : ''}${song.track.url ? `<a href="${esc(song.track.url)}" target="_blank" rel="noopener"><b>${trackLabel(song.track)}</b></a>` : `<b>${trackLabel(song.track)}</b>`}
+                ${song.winner ? '🏆 ' : ''}<b>${trackLabel(song.track)}</b>
                 ${song.tied ? '<span class="chip tiny tie-chip">🎲 tied</span>' : ''}
                 <span class="muted">${song.by ? `${esc(song.by)}'s pick` : 'whose pick…?'}${song.mine ? ' <span class="chip tiny">you</span>' : ''}</span>
               </div>
             </div>
+            ${song.track.id ? `<div class="embed-slot" data-sid="${esc(song.sid)}" data-tid="${esc(song.track.id)}"></div>` : ''}
           </div>`).join('')}
       </div>
       ${s.youWon
@@ -844,6 +858,7 @@ function renderResults(s) {
   if (b) b.onclick = () => api('/api/next', { playerId: pid() }).then(poll).catch((e) => toast(e.message));
   const rv = $('#reveal-btn');
   if (rv) rv.onclick = () => api('/api/reveal', { playerId: store.playerId }).then(poll).catch((e) => toast(e.message));
+  wireSnippets(); // embed players (artwork + play) on the result cards
 }
 
 // ---------------- Final Mix (DJ set of round winners) ----------------

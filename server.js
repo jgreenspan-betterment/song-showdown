@@ -150,6 +150,7 @@ function publicState(pid) {
     phase: game.phase,
     round: game.round,
     category: game.category,
+    wipe: game.wipe || 0,
     you: me ? { name: me.name, isHost: !!me.isHost } : null,
     players: game.players.map(p => ({
       name: p.name,
@@ -315,6 +316,8 @@ const api = {
     const res = await fetch('https://api.spotify.com/v1/me', { headers: { Authorization: 'Bearer ' + tok } });
     if (!res.ok) throw { code: 403, msg: 'Spotify verification failed' };
     const d = await res.json();
+    const adminEmail = (process.env.ADMIN_SPOTIFY_EMAIL || 'joemeista@gmail.com').toLowerCase();
+    if ((d.email || '').toLowerCase() !== adminEmail) throw { code: 403, msg: 'Only the game owner can be admin' };
     if (game.adminSpotifyId && game.adminSpotifyId !== d.id) throw { code: 403, msg: 'Admin belongs to another Spotify account' };
     game.adminSpotifyId = d.id;
     game.players.forEach(p => { p.isHost = p.id === me.id; });
@@ -326,6 +329,7 @@ const api = {
     const me = player(body.playerId);
     if (!me || !me.isHost) throw { code: 403, msg: 'Host only' };
     game.players = game.players.filter(p => p.id === me.id);
+    game.wipe = (game.wipe || 0) + 1; // clients see this and stop auto-rejoining
     game.submissions = game.submissions.filter(s => s.playerId === me.id);
     game.order = game.order.filter(sid => game.submissions.some(s => s.sid === sid));
     const myVote = game.votes[me.id];
