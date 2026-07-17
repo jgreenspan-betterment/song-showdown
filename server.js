@@ -57,6 +57,7 @@ function newGame(players = []) {
     order: [], // shuffled sids for anonymous display
     winner: null, // {sid, playerId} — never sent to clients directly
     history: [], // {round, category, track, votes}
+    playlistUrl: null, // Spotify playlist of the winners (host-created)
     adminSpotifyId: null, // Spotify user id that owns admin (set on first verified claim)
   };
 }
@@ -185,6 +186,9 @@ function publicState(pid) {
   if (game.phase === 'voting') {
     st.votedCount = Object.keys(game.votes).length;
     st.yourVote = game.votes[pid] || null;
+  }
+  if (game.phase === 'finale') {
+    st.playlistUrl = game.playlistUrl || null;
   }
   if (game.phase === 'results') {
     st.youWon = !!(game.winner && game.winner.playerId === pid);
@@ -355,6 +359,16 @@ const api = {
     }
     delete game.votes[t.id];
     if (game.pickerId === t.id) game.pickerId = (host() || {}).id || null;
+    bump();
+    return { ok: true };
+  },
+
+  'POST /api/playlist': (q, body) => {
+    const me = player(body.playerId);
+    if (!me || !me.isHost) throw { code: 403, msg: 'Host only' };
+    const url = typeof body.url === 'string' ? body.url.slice(0, 200) : '';
+    if (!/^https:\/\/open\.spotify\.com\//.test(url)) throw { code: 400, msg: 'Not a Spotify URL' };
+    game.playlistUrl = url;
     bump();
     return { ok: true };
   },

@@ -58,7 +58,7 @@ function setImpersonate(v) {
 
 // ---------------- Spotify auth (Authorization Code + PKCE) ----------------
 // streaming + read-email/private + playback-state power the Final Mix DJ player (Web Playback SDK)
-const SCOPES = 'user-library-read user-top-read streaming user-read-email user-read-private user-read-playback-state user-modify-playback-state';
+const SCOPES = 'user-library-read user-top-read streaming user-read-email user-read-private user-read-playback-state user-modify-playback-state playlist-modify-public';
 let clientId = '';
 let serverSearch = false; // server-side catalog search (no user login needed)
 
@@ -127,6 +127,17 @@ const spotify = {
     if (res.status === 401 && (await this.refresh())) {
       return fetch('https://api.spotify.com/v1' + path, { headers: { Authorization: 'Bearer ' + this.token } }).then((r) => r.json());
     }
+    if (!res.ok) throw new Error('Spotify API error ' + res.status);
+    return res.json();
+  },
+
+  async post(path, body) {
+    if (Date.now() > +(localStorage.getItem('sp_expires_at') || 0)) await this.refresh();
+    const res = await fetch('https://api.spotify.com/v1' + path, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + this.token, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
     if (!res.ok) throw new Error('Spotify API error ' + res.status);
     return res.json();
   },
@@ -210,6 +221,7 @@ function render() {
   const key = !joined ? 'join'
     : s.phase === 'lobby' ? `lobby:${s.players.length}`
     : s.phase === 'results' ? `results:${s.round}:${s.revealed ? 1 : 0}`
+    : s.phase === 'finale' ? `finale:${s.round}:${s.playlistUrl ? 1 : 0}`
     : `${s.phase}:${s.round}`;
   if (key !== renderedKey) {
     renderedKey = key;
@@ -894,8 +906,13 @@ function renderFinale(s) {
       <p class="muted center" id="mix-hint">${spotify.connected
         ? 'Connected — full tracks with DJ fades if this account has Premium; otherwise falls back to preview players.'
         : 'Tip for the DJ laptop: Connect Spotify (top right) for full-track playback with volume fades. Without it, preview clips with hard cuts.'}</p>
+      ${s.playlistUrl
+        ? `<p class="center"><a id="playlist-link" class="btn small ghost" href="${esc(s.playlistUrl)}" target="_blank" rel="noopener">🔗 Open the winners playlist</a></p>`
+        : spotify.connected ? '<p class="center"><button id="playlist-btn" class="btn small ghost">➕ Create Spotify playlist</button></p>' : ''}
       <div id="mix-embed" class="hidden"></div>
     </div>`;
+  const plb = $('#playlist-btn');
+  if (plb) plb.onclick = () => createFinalPlaylist(list);
   $('#mix-play').onclick = () => playSet(
     list.map((h, i) => ({ track: h.track, label: `<b>${trackLabel(h.track)}</b> <span class="muted">(${esc(h.category)})</span>`, idx: i })),
     {
@@ -911,6 +928,30 @@ function renderFinale(s) {
       doneMsg: '🎉 That was your set — great game!',
     });
   $('#mix-stop').onclick = stopSet;
+}
+
+// Create a real Spotify playlist of the round winners and share its URL with the room.
+async function createFinalPlaylist(list) {
+  const uris = list.filter((h) => h.track.id).map((h) => 'spotify:track:' + h.track.id);
+  if (!uris.length) return toast('No Spotify tracks in the setlist');
+  const btn = $('#playlist-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Creating…'; }
+  try {
+    const me = await spotify.call('/me');
+    const pl = await spotify.post(`/users/${encodeURIComponent(me.id)}/playlists`, {
+      name: 'Song Showdown — ' + new Date().toLocaleDateString(),
+      description: 'Round winners: ' + list.map((h) => h.category).join(' · '),
+      public: true,
+    });
+    await spotify.post(`/playlists/${pl.id}/tracks`, { uris });
+    const url = (pl.external_urls && pl.external_urls.spotify) || 'https://open.spotify.com/playlist/' + pl.id;
+    await api('/api/playlist', { playerId: store.playerId, url });
+    toast('Playlist created ✓', false);
+    await poll();
+  } catch (e) {
+    toast('Playlist failed: ' + e.message + ' — disconnect & reconnect Spotify to grant playlist access, then retry');
+    if (btn) { btn.disabled = false; btn.textContent = '➕ Create Spotify playlist'; }
+  }
 }
 
 const waitMs = (ms) => new Promise((r) => {
