@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Song Showdown</title>
+  <link rel="stylesheet" href="/style.css?v=2">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎧</text></svg>">
+</head>
+<body>
+  <header>
+    <h1>🎧 Song Showdown</h1>
+    <div id="topbar">
+      <span id="round-chip" class="chip hidden"></span>
+      <button id="spotify-btn" class="btn small ghost hidden">Connect Spotify</button>
+    </div>
+  </header>
+
+  <nav id="stepper"></nav>
+
+  <main id="app">
+    <div id="phase-root">
+      <p class="muted center">Loading…</p>
+    </div>
+
+    <section id="players-panel" class="panel hidden">
+      <h3>Players</h3>
+      <ul id="player-list"></ul>
+    </section>
+
+    <section id="history-panel" class="panel hidden">
+      <h3>Past rounds</h3>
+      <ol id="history-list"></ol>
+    </section>
+
+  </main>
+
+  <aside id="admin-panel" class="hidden">
+    <h3>🛠 Admin</h3>
+    <p class="muted tiny-note">Only you see this (Spotify-verified host).</p>
+    <div id="ap-actions" class="ap-group"></div>
+    <h4>Test players</h4>
+    <div id="test-tools" class="ap-group"></div>
+  </aside>
+
+  <div id="toast" class="hidden"></div>
+  <script src="/app.js?v=2"></script>
+</body>
+</html>

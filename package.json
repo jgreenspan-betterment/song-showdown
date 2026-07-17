@@ -1,0 +1,8 @@
+{
+  "name": "song-showdown",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Team music game — category picks, anonymous voting, 15s snippet DJ mixes",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=18" }
+}
