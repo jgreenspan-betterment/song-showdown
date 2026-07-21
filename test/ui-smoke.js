@@ -136,12 +136,14 @@ async function serverApi(p, body) {
   await sleep(400);
   check('stepper returns to voting (votes reset)', $('#vote-progress') && $('#vote-progress').textContent.includes('0/3'));
   check('3 song cards', window.document.querySelectorAll('#ballot .song-card').length === 3);
-  check('own song marked, no vote button on it', window.document.querySelectorAll('.vote-btn').length === 2 && $('.song-card.mine').textContent.includes('your pick'));
+  check('ballot is anonymous: identical cards, vote button on all', window.document.querySelectorAll('.vote-btn').length === 3 && !$('.song-card.mine') && !$('#ballot').textContent.includes('your pick') && !window.document.querySelector('.pos-note'));
   check('embed slot for spotify track', window.document.querySelectorAll('#ballot .embed-slot').length === 1);
   const snips = window.document.querySelectorAll('.snip-btn');
   check('snippet button only on spotify track', snips.length === 1);
   check('snippet uses submitter start time (75s)', snips[0] && snips[0].dataset.start === '75');
-  window.document.querySelector('.vote-btn').click();
+  const stV = await serverApi('/api/state?playerId=' + window.localStorage.getItem('ssg_player_id'));
+  const notMineSid = stV.songs.find((x) => !x.mine).sid;
+  [...window.document.querySelectorAll('.vote-btn')].find((b) => b.dataset.sid === notMineSid).click();
   await sleep(300);
   check('vote button flips to Voted', [...window.document.querySelectorAll('.vote-btn')].some((b) => b.textContent.includes('Voted')));
   check('live vote board shows who voted', $('#vote-board') && $('#vote-board').textContent.includes('Dana ✓'));
@@ -176,14 +178,14 @@ async function serverApi(p, body) {
   await window.submitTrack({ id: '003vvx7Niy0yvhvHt4a68B', name: 'Mr. Brightside', artists: 'The Killers', durationMs: 222000 });
   await sleep(300);
   check('your-pick preview player present', !!$('#yp-embed') && !!$('#yp-preview'));
-  check('position readout in your-pick banner', !!$('#yp-pos'));
+  check('drag-to-set snippet label in your-pick banner', !!$('#yp-start'));
   await serverApi('/api/submit', { playerId: ana, track: { id: '4uLU6hMCjMI75M1A2tKUQC', name: 'Never Gonna Give You Up', artists: 'Rick Astley', durationMs: 213000, startSec: 43, fadeIn: 3, fadeOut: 4 } });
   await serverApi('/api/submit', { playerId: ben, track: { manual: 'Levels — Avicii' } });
   await window.poll();
   const st2 = await serverApi('/api/state?playerId=' + ana);
   const anaSid = st2.songs.find((x) => x.track.name === 'Never Gonna Give You Up').sid;
   const danaSid2 = st2.songs.find((x) => x.track.name === 'Mr. Brightside').sid;
-  check('position readout on own voting card', !!window.document.querySelector('.pos-note'));
+  check('no ownership hints on ballot (round 2)', !window.document.querySelector('.pos-note') && !$('#ballot').textContent.includes('your pick'));
   [...window.document.querySelectorAll('.vote-btn')].find((b) => b.dataset.sid === anaSid).click(); // Dana → Ana
   await sleep(200);
   // Mid-vote snippet edit: Ana moves her start to 90s; Dana's ballot button updates on next poll

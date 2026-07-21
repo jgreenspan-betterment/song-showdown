@@ -56,7 +56,8 @@ function newGame(players = []) {
     votes: {}, // voterId -> sid
     order: [], // shuffled sids for anonymous display
     winner: null, // {sid, playerId} — never sent to clients directly
-    history: [], // {round, category, track, votes}
+    history: [], // {round, category, track, votes, points}
+    scores: {}, // playerId -> {name, points, isBot} — running game totals (votes earned by your songs)
     allSongs: [], // every submission from every finished round
     playlistUrl: null, // Spotify playlist of the winners (host-created)
     adminSpotifyId: null, // Spotify user id that owns admin (set on first verified claim)
@@ -112,11 +113,15 @@ function startVoting() {
 }
 
 function finishRound() {
-  const tally = {};
-  for (const sid of Object.values(game.votes)) tally[sid] = (tally[sid] || 0) + 1;
+  // A human vote is worth 500 points, a bot vote 250. Winner = most points (tie → random).
+  const tally = {}, points = {};
+  for (const [voterId, sid] of Object.entries(game.votes)) {
+    tally[sid] = (tally[sid] || 0) + 1;
+    points[sid] = (points[sid] || 0) + ((player(voterId) || {}).isBot ? 250 : 500);
+  }
   let best = -1, winners = [];
   for (const s of game.submissions) {
-    const n = tally[s.sid] || 0;
+    const n = points[s.sid] || 0;
     if (n > best) { best = n; winners = [s]; }
     else if (n === best) winners.push(s);
   }
@@ -125,7 +130,16 @@ function finishRound() {
   game.tiedSids = winners.length > 1 ? winners.map(x => x.sid) : [];
   game.revealed = false;
   game.tally = tally;
-  game.history.push({ round: game.round, category: game.category, track: w.track, votes: best, by: (player(w.playerId) || {}).name || '?', tie: winners.length > 1 });
+  game.points = points;
+  game.scores = game.scores || {};
+  for (const s of game.submissions) {
+    const p = player(s.playerId);
+    const rec = game.scores[s.playerId] || { name: (p || {}).name || '?', points: 0, isBot: !!(p || {}).isBot };
+    rec.points += points[s.sid] || 0;
+    if (p) rec.name = p.name;
+    game.scores[s.playerId] = rec;
+  }
+  game.history.push({ round: game.round, category: game.category, track: w.track, votes: tally[w.sid] || 0, points: points[w.sid] || 0, by: (player(w.playerId) || {}).name || '?', tie: winners.length > 1 });
   game.allSongs = (game.allSongs || []).concat(game.submissions.map(s => ({
     round: game.round, category: game.category, track: s.track,
     by: (player(s.playerId) || {}).name || '?', winner: s.sid === w.sid,
@@ -181,6 +195,7 @@ function publicState(pid) {
       const item = { sid, track: s.track, mine: s.playerId === pid };
       if (game.phase === 'results') {
         item.votes = (game.tally && game.tally[sid]) || 0;
+        item.points = (game.points && game.points[sid]) || 0;
         item.winner = game.winner && game.winner.sid === sid;
         item.by = game.revealed ? ((player(s.playerId) || {}).name || 'left the game') : null;
         item.tied = (game.tiedSids || []).includes(sid);
@@ -192,11 +207,18 @@ function publicState(pid) {
     st.votedCount = Object.keys(game.votes).length;
     st.yourVote = game.votes[pid] || null;
   }
+  // Running totals: only shared once the round is revealed (a mid-round leaderboard
+  // delta would give away whose song just won).
+  const scoreboard = () => Object.values(game.scores || {})
+    .map(r => ({ name: r.name, points: r.points, isBot: !!r.isBot }))
+    .sort((a, b) => b.points - a.points);
   if (game.phase === 'finale') {
     st.playlistUrl = game.playlistUrl || null;
     st.allSongs = game.allSongs || [];
+    st.scores = scoreboard();
   }
   if (game.phase === 'results') {
+    if (game.revealed) st.scores = scoreboard();
     st.youWon = !!(game.winner && game.winner.playerId === pid);
     st.revealed = !!game.revealed;
     st.winnerName = game.revealed && game.winner ? ((player(game.winner.playerId) || {}).name || '?') : null;
@@ -232,6 +254,7 @@ const api = {
         image: t.album?.images?.length ? t.album.images[t.album.images.length - 1].url : null,
         url: t.external_urls?.spotify || null,
         durationMs: t.duration_ms || null,
+        year: t.album?.release_date ? +String(t.album.release_date).slice(0, 4) || null : null,
       })),
     };
   },
@@ -241,7 +264,7 @@ const api = {
     if (!name) throw { code: 400, msg: 'Name required' };
     // Reconnect by id if the client already has one.
     if (body.playerId && player(body.playerId)) return { playerId: body.playerId };
-    const p = { id: id(), name, isHost: game.players.length === 0 };
+    const p = { id: id(), name, isHost: game.players.length === 0, isBot: !!body.bot };
     game.players.push(p);
     bump();
     return { playerId: p.id };
@@ -377,6 +400,7 @@ const api = {
       category: String(h.category || '').slice(0, 80),
       track: cleanTrack(h.track) || { manual: 'unknown' },
       votes: Math.max(0, Math.min(99, Math.round(+h.votes) || 0)),
+      points: Math.max(0, Math.min(99000, Math.round(+h.points) || (Math.round(+h.votes) || 0) * 500)),
       by: String(h.by || '?').slice(0, 24),
       tie: !!h.tie,
     }));

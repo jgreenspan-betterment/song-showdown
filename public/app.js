@@ -201,6 +201,7 @@ async function poll() {
     }
   } catch (_) { return; /* transient network error — keep polling */ }
   if (!state || s.v !== state.v) { state = s; render(); }
+  botAutopilot(s); // fire-and-forget; serializes itself via autopilot.busy
 }
 
 function render() {
@@ -311,6 +312,221 @@ const testStore = {
 };
 const shuffleArr = (a) => a.slice().sort(() => Math.random() - 0.5);
 
+// ---------------- bot DJ brain (category-aware test submissions) ----------------
+// Seeds are real on-category songs, written punctuation-free (Spotify search ignores it).
+// Bots search a shuffled plan and each takes a different track (dedupe via `used`).
+const BOT_WORDS = ['love', 'night', 'dance', 'heart', 'fire', 'time', 'baby', 'girl', 'city', 'rain'];
+const BOT_SEEDS = {
+  'Instrumentals': ['green onions booker t', 'sleepwalk santo and johnny', 'frankenstein edgar winter group', 'jessica allman brothers', 'misirlou dick dale', 'chameleon herbie hancock', 'yyz rush', 'cliffs of dover eric johnson'],
+  'Songs with no vocals': ['strobe deadmau5', 'time hans zimmer', 'clair de lune debussy', 'gymnopedie no 1 satie', 'divenire ludovico einaudi', 'first breath after coma explosions in the sky', 'your hand in mine explosions in the sky', 'nuvole bianche einaudi'],
+  'Covers': ['hurt johnny cash', 'all along the watchtower jimi hendrix', 'hallelujah jeff buckley', 'respect aretha franklin', 'i will always love you whitney houston', 'valerie amy winehouse mark ronson', 'tainted love soft cell', 'nothing compares 2 u sinead oconnor'],
+  'Songs under 2 minutes': ['fell in love with a girl white stripes', 'judy is a punk ramones', 'golden slumbers beatles', 'i will beatles', 'old town road lil nas x', 'panini lil nas x', 'jocelyn flores xxxtentacion', 'white riot the clash'],
+  'Guilty pleasures': ['barbie girl aqua', 'never gonna give you up rick astley', 'call me maybe carly rae jepsen', 'mmmbop hanson', 'what makes you beautiful one direction', 'party in the usa miley cyrus', 'cotton eye joe rednex', 'wannabe spice girls'],
+  'Pump me up': ['eye of the tiger survivor', 'till i collapse eminem', 'thunderstruck acdc', 'lose yourself eminem', 'remember the name fort minor', 'stronger kanye west', 'cant hold us macklemore', 'welcome to the jungle guns n roses'],
+  'Earworms': ['take on me a-ha', 'call me maybe carly rae jepsen', 'bad guy billie eilish', 'uptown funk mark ronson', 'shake it off taylor swift', 'cant stop the feeling justin timberlake', 'happy pharrell williams', 'seven nation army white stripes'],
+  'Movie soundtrack': ['my heart will go on celine dion', 'stayin alive bee gees', 'footloose kenny loggins', 'ghostbusters ray parker jr', 'time of my life bill medley', 'lose yourself eminem', 'skyfall adele', 'shallow lady gaga bradley cooper'],
+  'One-word title': ['hello adele', 'yellow coldplay', 'believe cher', 'africa toto', 'royals lorde', 'umbrella rihanna', 'happy pharrell williams', 'faith george michael'],
+  'Songs to cry to': ['someone like you adele', 'fix you coldplay', 'hurt johnny cash', 'tears in heaven eric clapton', 'everybody hurts rem', 'skinny love bon iver', 'liability lorde', 'when the partys over billie eilish'],
+  'Road trip': ['life is a highway tom cochrane', 'take it easy eagles', 'go your own way fleetwood mac', 'sweet home alabama lynyrd skynyrd', 'born to run bruce springsteen', 'shut up and drive rihanna', 'send me on my way rusted root', 'ride twenty one pilots'],
+  'Karaoke banger': ['dont stop believin journey', 'bohemian rhapsody queen', 'sweet caroline neil diamond', 'livin on a prayer bon jovi', 'i want it that way backstreet boys', 'wonderwall oasis', 'mr brightside the killers', 'total eclipse of the heart bonnie tyler'],
+  'Best opening 10 seconds': ['smells like teen spirit nirvana', 'seven nation army white stripes', 'sweet child o mine guns n roses', 'money for nothing dire straits', 'baba oriley the who', 'crazy in love beyonce', 'blinding lights the weeknd', 'under pressure queen david bowie'],
+  'Song you loved in high school': ['mr brightside the killers', 'i write sins not tragedies panic at the disco', 'welcome to the black parade my chemical romance', 'stacys mom fountains of wayne', 'in the end linkin park', 'sk8er boi avril lavigne', 'crank that soulja boy', 'hot n cold katy perry'],
+  'Best song from a bad artist': ['how you remind me nickelback', 'all star smash mouth', 'ice ice baby vanilla ice', 'blue da ba dee eiffel 65', 'butterfly crazy town', 'with arms wide open creed', 'break stuff limp bizkit', 'photograph nickelback'],
+  'Hidden gem (under 1M plays)': ['b side deep cut', 'bedroom pop demo', 'obscure soul 45', 'private press funk', 'japanese city pop rare', 'library music groove', 'psych folk obscure', 'lo-fi home recording'],
+  'Best duet or collab': ['under pressure queen david bowie', 'empire state of mind jay-z alicia keys', 'shallow lady gaga bradley cooper', 'islands in the stream kenny rogers dolly parton', 'dont go breaking my heart elton john kiki dee', 'aint no mountain high enough marvin gaye tammi terrell', 'telephone lady gaga beyonce', 'airplanes bob hayley williams'],
+  'Song in another language': ['despacito luis fonsi', 'la vie en rose edith piaf', 'gangnam style psy', '99 luftballons nena', 'dragostea din tei o-zone', 'la bamba ritchie valens', 'bamboleo gipsy kings', 'sukiyaki kyu sakamoto'],
+  'Warm-up opener': ['intro the xx', 'midnight city m83', 'sunset lover petit biscuit', 'nightcall kavinsky', 'odessa caribou', 'porcelain moby', 'genesis justice', 'kids mgmt'],
+  'Build the energy': ['one more time daft punk', 'dance justice', 'around the world daft punk', 'galvanize chemical brothers', 'move your feet junior senior', 'dont you worry child swedish house mafia', 'pump up the jam technotronic', 'blue monday new order'],
+  'Peak-hour banger': ['losing it fisher', 'titanium david guetta sia', 'levels avicii', 'animals martin garrix', 'turn down for what dj snake lil jon', 'satisfaction benny benassi', 'bangarang skrillex', 'sandstorm darude'],
+  'The drop': ['scary monsters and nice sprites skrillex', 'bangarang skrillex', 'harlem shake baauer', 'core rl grime', 'turn down for what dj snake', 'first of the year skrillex', 'internet friends knife party', 'crave you adventure club remix'],
+  'Smooth groove': ['get lucky daft punk', 'redbone childish gambino', 'passionfruit drake', 'best part daniel caesar', 'smooth operator sade', 'golden jill scott', 'lovely day bill withers', 'rock with you michael jackson'],
+  'Sunset set': ['sun is shining bob marley', 'island in the sun weezer', 'kokomo beach boys', 'banana pancakes jack johnson', 'santeria sublime', 'three little birds bob marley', 'sunset lover petit biscuit', 'california stars billy bragg wilco'],
+  'Cooldown': ['breathe telepopmusik', 'teardrop massive attack', 'porcelain moby', 'holocene bon iver', 'cold little heart michael kiwanuka', 'night owl galimatias', 'flightless bird american mouth iron and wine', 'bloom odesza'],
+  'After-hours (2am)': ['after hours the weeknd', 'nikes frank ocean', 'the hills the weeknd', 'marvins room drake', 'often the weeknd', 'earned it the weeknd', 'novacane frank ocean', 'all the time jeremih'],
+  'Set closer': ['closing time semisonic', 'dont stop believin journey', 'last dance donna summer', 'new york new york frank sinatra', 'piano man billy joel', 'all these things that ive done the killers', 'time of your life green day', 'bittersweet symphony the verve'],
+  '80s': ['take on me a-ha', 'billie jean michael jackson', 'sweet dreams eurythmics', 'livin on a prayer bon jovi', 'like a virgin madonna', 'dont you want me human league', 'girls just want to have fun cyndi lauper', 'every breath you take the police'],
+  '90s': ['smells like teen spirit nirvana', 'wonderwall oasis', 'no diggity blackstreet', 'waterfalls tlc', 'wannabe spice girls', 'losing my religion rem', 'juicy the notorious big', 'torn natalie imbruglia'],
+  '2000s': ['hey ya outkast', 'crazy in love beyonce', 'in da club 50 cent', 'mr brightside the killers', 'toxic britney spears', 'hips dont lie shakira', 'seven nation army white stripes', 'umbrella rihanna'],
+  'Hip-hop': ['juicy the notorious big', 'nuthin but a g thang dr dre', 'ms jackson outkast', 'lose yourself eminem', 'california love 2pac', 'it was a good day ice cube', 'alright kendrick lamar', 'sicko mode travis scott'],
+  'Country': ['friends in low places garth brooks', 'jolene dolly parton', 'ring of fire johnny cash', 'take me home country roads john denver', 'before he cheats carrie underwood', 'cruise florida georgia line', 'need you now lady antebellum', 'tennessee whiskey chris stapleton'],
+  'Jazz': ['take five dave brubeck', 'so what miles davis', 'my favorite things john coltrane', 'feeling good nina simone', 'fly me to the moon frank sinatra', 'what a wonderful world louis armstrong', 'take the a train duke ellington', 'summertime ella fitzgerald'],
+  'Punk': ['blitzkrieg bop ramones', 'anarchy in the uk sex pistols', 'london calling the clash', 'holiday in cambodia dead kennedys', 'basket case green day', 'ever fallen in love buzzcocks', 'search and destroy the stooges', 'rise above black flag'],
+  'Disco': ['stayin alive bee gees', 'i will survive gloria gaynor', 'le freak chic', 'dancing queen abba', 'september earth wind and fire', 'funkytown lipps inc', 'dont stop til you get enough michael jackson', 'you should be dancing bee gees'],
+  'R&B': ['no diggity blackstreet', 'lets stay together al green', 'adorn miguel', 'untitled how does it feel dangelo', 'my boo usher alicia keys', 'say my name destinys child', 'best part daniel caesar', 'kiss it better rihanna'],
+  'Indie': ['do i wanna know arctic monkeys', 'take me out franz ferdinand', 'dog days are over florence and the machine', 'electric feel mgmt', 'skinny love bon iver', 'myth beach house', 'the less i know the better tame impala', 'lisztomania phoenix'],
+  'Metal': ['master of puppets metallica', 'paranoid black sabbath', 'ace of spades motorhead', 'run to the hills iron maiden', 'chop suey system of a down', 'walk pantera', 'enter sandman metallica', 'holy diver dio'],
+  'Pop-punk': ['all the small things blink-182', 'sk8er boi avril lavigne', 'basket case green day', 'sugar were goin down fall out boy', 'ocean avenue yellowcard', 'misery business paramore', 'dammit blink-182', 'american idiot green day'],
+  'K-pop': ['dynamite bts', 'gangnam style psy', 'how you like that blackpink', 'ddu-du ddu-du blackpink', 'butter bts', 'fancy twice', 'gee girls generation', 'growl exo'],
+  'Classical': ['clair de lune debussy', 'moonlight sonata beethoven', 'the four seasons spring vivaldi', 'canon in d pachelbel', 'nocturne op 9 no 2 chopin', 'ride of the valkyries wagner', 'symphony no 5 beethoven', 'gymnopedie no 1 satie'],
+  'Folk': ['the times they are a changin bob dylan', 'big yellow taxi joni mitchell', 'the sound of silence simon and garfunkel', 'this land is your land woody guthrie', 'ho hey the lumineers', 'i will wait mumford and sons', 'landslide fleetwood mac', 'rivers and roads the head and the heart'],
+  'Electronic': ['one more time daft punk', 'strobe deadmau5', 'levels avicii', 'midnight city m83', 'galvanize chemical brothers', 'firestarter the prodigy', 'opus eric prydz', 'innerbloom rufus du sol'],
+  'Reggae': ['no woman no cry bob marley', 'three little birds bob marley', 'red red wine ub40', 'bam bam sister nancy', 'israelites desmond dekker', 'pressure drop toots and the maytals', 'welcome to jamrock damian marley', 'temperature sean paul'],
+  'Latin': ['despacito luis fonsi', 'la bamba ritchie valens', 'livin la vida loca ricky martin', 'danza kuduro don omar', 'bailando enrique iglesias', 'vivir mi vida marc anthony', 'gasolina daddy yankee', 'oye como va santana'],
+  'Rock': ['bohemian rhapsody queen', 'back in black acdc', 'sweet child o mine guns n roses', 'smells like teen spirit nirvana', 'satisfaction the rolling stones', 'hotel california eagles', 'born to run bruce springsteen', 'wont get fooled again the who'],
+  'Pop': ['billie jean michael jackson', 'shake it off taylor swift', 'blinding lights the weeknd', 'firework katy perry', 'call me maybe carly rae jepsen', 'as it was harry styles', 'rolling in the deep adele', 'cant stop the feeling justin timberlake'],
+};
+// Categories that need more than a good search query: filter results / dig past the hits.
+const BOT_PICKY = {
+  'Songs under 2 minutes': { filter: (t) => t.durationMs && t.durationMs < 120000 },
+  'One-word title': { filter: (t) => !/\s/.test((t.name || '').trim()) },
+  'Hidden gem (under 1M plays)': { mode: 'deep' },
+};
+// Free-typed category → closest seed list (checked before genre rules).
+const BOT_PROMPT_RULES = [
+  [/karaoke/, 'Karaoke banger'],
+  [/instrumental|no (vocals|lyrics)/, 'Instrumentals'],
+  [/\bcovers?\b/, 'Covers'],
+  [/\bcry\b|\bsad\b|tear.?jerker|heartbreak/, 'Songs to cry to'],
+  [/movie|film|soundtrack|cinematic/, 'Movie soundtrack'],
+  [/road.?trip|driving/, 'Road trip'],
+  [/duet|collab|featuring/, 'Best duet or collab'],
+  [/workout|gym|pump|hype|adrenaline/, 'Pump me up'],
+  [/guilty pleasure/, 'Guilty pleasures'],
+  [/high school|throwback|nostalgi/, 'Song you loved in high school'],
+  [/another language|foreign|non.?english/, 'Song in another language'],
+  [/earworm|catchy|stuck in (my|your) head/, 'Earworms'],
+  [/banger|club|party|dance.?floor/, 'Peak-hour banger'],
+  [/chill|mellow|relax|cool.?down|wind.?down/, 'Cooldown'],
+  [/late.?night|2 ?am|after.?hours/, 'After-hours (2am)'],
+  [/opener|warm.?up/, 'Warm-up opener'],
+  [/closer|closing|last song|send.?off/, 'Set closer'],
+  [/short|under 2/, 'Songs under 2 minutes'],
+  [/one.?word/, 'One-word title'],
+  [/hidden gem|deep cut|obscure|underrated/, 'Hidden gem (under 1M plays)'],
+];
+// Free-typed genre words → [regex, spotify genre: filter, seed-list key]. Seeds beat the
+// genre: filter (which is flaky on track search); order matters: pop punk before punk, k-pop before pop.
+const BOT_GENRE_RULES = [
+  [/pop.?punk/, 'pop punk', 'Pop-punk'], [/k.?pop/, 'k-pop', 'K-pop'], [/hip.?hop|\brap\b/, 'hip-hop', 'Hip-hop'],
+  [/r&b|\brnb\b|\bsoul\b/, 'r&b', 'R&B'], [/electro|\bedm\b|\bhouse\b|techno/, 'electronic', 'Electronic'],
+  [/country/, 'country', 'Country'], [/jazz/, 'jazz', 'Jazz'], [/punk/, 'punk', 'Punk'], [/disco/, 'disco', 'Disco'],
+  [/indie/, 'indie', 'Indie'], [/metal/, 'metal', 'Metal'], [/classical/, 'classical', 'Classical'], [/\bfolk\b/, 'folk', 'Folk'],
+  [/reggae/, 'reggae', 'Reggae'], [/latin/, 'latin', 'Latin'], [/\brock\b/, 'rock', 'Rock'], [/\bpop\b/, 'pop', 'Pop'],
+  [/blues/, 'blues'], [/funk/, 'funk'],
+];
+
+// Returns a prioritized list of search steps {q, mode: top|any|deep, filter?} for a category.
+function botQueriesFor(cat) {
+  const c = (cat || '').trim(), lc = c.toLowerCase();
+  const seeds = (key, extra) => shuffleArr(BOT_SEEDS[key]).map((q) => ({ q, mode: 'top', ...(BOT_PICKY[key] || {}), ...(extra || {}) }));
+
+  // Decade + genre signals combine: "90s rap" → hip-hop seeds verified against 1990-1999.
+  const dec = lc.match(/\b(?:19|20)?(\d)0'?s\b/);
+  const named = [[/sixties/, 1960], [/seventies/, 1970], [/eighties/, 1980], [/nineties/, 1990]].find(([re]) => re.test(lc));
+  let from = null;
+  if (dec) { const d = +dec[1] * 10; from = d >= 30 ? 1900 + d : 2000 + d; }
+  else if (named) from = named[1];
+  const genreRule = BOT_GENRE_RULES.find(([re]) => re.test(lc));
+  const g = genreRule && genreRule[1], gSeeds = genreRule && genreRule[2];
+  const inDecade = (t) => t.year && t.year >= from && t.year < from + 10;
+  const yearTail = from == null ? [] : shuffleArr(BOT_WORDS).map((w) => ({ q: `${w} year:${from}-${from + 9}`, mode: 'any' }));
+
+  // "Mixes well after last winner" — actually look at what just won.
+  if (lc.includes('mixes well')) {
+    const last = state && state.history && state.history[state.history.length - 1];
+    const artist = last && last.track && last.track.artists ? last.track.artists.split(',')[0].trim() : '';
+    return (artist ? [{ q: artist, mode: 'any' }] : []).concat(seeds('Build the energy'));
+  }
+  if (BOT_SEEDS[c]) return seeds(c).concat(yearTail);
+  if (from != null && gSeeds) return seeds(gSeeds, { filter: inDecade }).concat(yearTail);
+  if (from != null && g) return shuffleArr(BOT_WORDS).map((w) => ({ q: `${w} genre:"${g}" year:${from}-${from + 9}`, mode: 'any' })).concat(yearTail);
+  if (from != null) return yearTail;
+
+  for (const [re, key] of BOT_PROMPT_RULES) if (re.test(lc)) return seeds(key);
+  if (gSeeds) return seeds(gSeeds);
+  if (g) return shuffleArr(BOT_WORDS).map((w) => ({ q: `${w} genre:"${g}"`, mode: 'any' })).concat({ q: `genre:"${g}"`, mode: 'any' });
+
+  // Last resort: search the category text itself, minus filler words.
+  const stripped = lc.replace(/\b(best|worst|favorite|favourite|song|songs|track|tracks|tune|tunes|a|an|the|of|all|time|your|my|most|that|to|for|with|ever|about)\b/g, ' ').replace(/\s+/g, ' ').trim();
+  const plan = [];
+  if (stripped && stripped !== lc) plan.push({ q: stripped, mode: 'any' });
+  plan.push({ q: c, mode: 'any' });
+  return plan;
+}
+
+// Not real submissions: karaoke/tribute covers, white noise, kids novelty, etc.
+const BOT_JUNK = /karaoke|tribute|made famous|in the style of|cover (by|ver)|string quartet|orchestral ver|piano (version|cover)|english ver|acoustic ver|\binst\b|white noise|rain sounds|nature sounds|sleep (sounds|music|aid|baby)|asmr|lullab|meditat|music box|8.?bit|nursery|kidz|cocomelon|super simple/i;
+
+// Runs the plan against /api/search until a fresh track turns up. null = nothing found.
+// `used` holds ids AND normalized name|artist keys, so remasters of a taken song don't sneak in.
+async function botPickTrack(category, used) {
+  const nameKey = (t) => (t.name || '').toLowerCase().replace(/\s*[([-].*$/, '').trim() + '|' + (t.artists || '').toLowerCase();
+  for (const step of botQueriesFor(category).slice(0, 12)) {
+    try {
+      const r = await api('/api/search?q=' + encodeURIComponent(step.q));
+      let cands = (r.tracks || []).filter((t) => t.id && !BOT_JUNK.test(`${t.name} ${t.artists} ${t.album}`));
+      if (step.filter) cands = cands.filter(step.filter);
+      let t = null;
+      if (step.mode === 'top') {
+        // Seed queries: the top hit IS the song. If a previous bot already took it,
+        // jump to the next seed rather than sliding into covers/remasters of it.
+        t = cands[0];
+        if (t && (used.has(t.id) || used.has(nameKey(t)))) t = null;
+      } else {
+        cands = cands.filter((x) => !used.has(x.id) && !used.has(nameKey(x)));
+        t = step.mode === 'deep' ? cands[cands.length - 1] : cands[Math.floor(Math.random() * Math.min(5, cands.length))];
+      }
+      if (t) { used.add(t.id); used.add(nameKey(t)); return t; }
+    } catch (_) { /* search hiccup or dud query — try the next step */ }
+  }
+  return null;
+}
+
+// ---------------- bot autopilot (bots play their whole turn unprompted) ----------------
+// Runs from the host's browser on every poll tick. Bots pick a category when the round is
+// theirs, submit an on-category song, and vote, with no cueing. If a bot wins, the game
+// moves on to its pick a few seconds after the reveal. Bots pause while the host closes the tab.
+const ALL_CATS = [...PROMPTS, ...GENRES, ...DJFLOW];
+const autopilot = { busy: false, round: 0, used: new Set(), revealSeen: 0, nextFired: false };
+
+async function botAutopilot(s) {
+  if (autopilot.busy || !s || !s.you || !s.you.isHost) return;
+  const imp = store.impersonate;
+  // Hands off any bot the host is currently playing as.
+  const bots = testStore.ids.filter((b) => !imp || imp.id !== b.id);
+  if (!bots.length) return;
+  if (s.round !== autopilot.round) { autopilot.round = s.round; autopilot.used.clear(); autopilot.revealSeen = 0; autopilot.nextFired = false; }
+  const flag = (b, key) => (s.players.find((p) => p.name === b.name) || {})[key];
+  autopilot.busy = true;
+  try {
+    if (s.phase === 'picking') {
+      const picker = bots.find((b) => b.name === s.pickerLabel);
+      if (picker) {
+        const cat = ALL_CATS[Math.floor(Math.random() * ALL_CATS.length)];
+        await api('/api/category', { playerId: picker.id, category: cat });
+        toast(`🤖 ${picker.name} picked: ${cat}`, false);
+        await poll();
+      }
+    } else if (s.phase === 'submitting') {
+      // Don't let a bot duplicate the host's own pick.
+      if (s.yourSubmission && s.yourSubmission.id) autopilot.used.add(s.yourSubmission.id);
+      const pending = bots.filter((b) => flag(b, 'submitted') === false);
+      for (const b of pending) {
+        const track = serverSearch ? await botPickTrack(s.category, autopilot.used) : null;
+        await api('/api/submit', { playerId: b.id, track: track || { manual: 'Mystery track from ' + b.name } });
+      }
+      if (pending.length) await poll();
+    } else if (s.phase === 'voting') {
+      const pending = bots.filter((b) => flag(b, 'voted') === false);
+      for (const b of pending) {
+        for (const sid of shuffleArr((s.songs || []).map((x) => x.sid))) {
+          try { await api('/api/vote', { playerId: b.id, sid }); break; } catch (_) { /* own song — try next */ }
+        }
+      }
+      if (pending.length) await poll();
+    } else if (s.phase === 'results' && s.revealed && s.winnerName && bots.some((b) => b.name === s.winnerName)) {
+      // A bot won: give the reveal a moment on screen, then move the game along for it.
+      if (!autopilot.revealSeen) autopilot.revealSeen = Date.now();
+      else if (!autopilot.nextFired && Date.now() - autopilot.revealSeen > 6000) {
+        autopilot.nextFired = true;
+        await api('/api/next', { playerId: store.playerId });
+        await poll();
+      }
+    }
+  } catch (_) { /* transient error: server flags still show the action pending, next tick retries */ }
+  autopilot.busy = false;
+}
+
 function renderTestTools(s) {
   const el = $('#test-tools');
   if (!el) return;
@@ -318,7 +534,10 @@ function renderTestTools(s) {
   const bots = testStore.ids;
   const imp = store.impersonate;
   el.innerHTML = `
-    <button id="tt-add" class="btn small ghost">➕ Add test player</button>
+    <div class="tt-row">
+      <button id="tt-add" class="btn small ghost">➕ Add test players</button>
+      <input id="tt-count" class="tt-count" type="number" min="1" max="30" value="1" aria-label="How many test players to add">
+    </div>
     ${bots.map((b) => `
       <div class="tt-row">
         <span>${imp && imp.id === b.id ? '🎭 ' : ''}${esc(b.name)}</span>
@@ -326,8 +545,7 @@ function renderTestTools(s) {
           ${imp && imp.id === b.id ? 'Playing ✓' : 'Play as'}
         </button>
       </div>`).join('')}
-    ${bots.length && s.phase === 'submitting' ? '<button id="tt-submit" class="btn small ghost">🎲 Submit for all tests</button>' : ''}
-    ${bots.length && s.phase === 'voting' ? '<button id="tt-vote" class="btn small ghost">🎲 Vote as all tests</button>' : ''}
+    ${bots.length ? '<p class="muted tt-hint">🤖 Autopilot: bots pick categories, submit on-category songs and vote on their own.</p>' : ''}
     ${bots.length ? '<button id="tt-clear" class="btn small ghost">🧹 Remove tests</button>' : ''}`;
 
   el.querySelectorAll('.tt-imp').forEach((b) => {
@@ -339,37 +557,18 @@ function renderTestTools(s) {
   });
 
   $('#tt-add').onclick = async () => {
+    const n = Math.max(1, Math.min(30, Math.round(+$('#tt-count').value) || 1));
+    const added = [];
     try {
-      const n = bots.length + 1;
-      const j = await api('/api/join', { name: 'Test ' + n });
-      testStore.ids = [...bots, { id: j.playerId, name: 'Test ' + n }];
-      toast(`Test ${n} joined 🎭`, false);
-      await poll();
-    } catch (e) { toast(e.message); }
-  };
-
-  const sub = $('#tt-submit');
-  if (sub) sub.onclick = async () => {
-    const TERMS = ['daft punk', 'queen', 'abba', 'hans zimmer', 'beatles', 'fleetwood mac', 'outkast', 'toto', 'daft punk instrumental', 'movie soundtrack'];
-    for (const b of testStore.ids) {
-      try {
-        let track = null;
-        if (serverSearch) {
-          const r = await api('/api/search?q=' + encodeURIComponent(TERMS[Math.floor(Math.random() * TERMS.length)]));
-          track = r.tracks[Math.floor(Math.random() * Math.min(5, r.tracks.length))] || null;
-        }
-        await api('/api/submit', { playerId: b.id, track: track || { manual: 'Mystery track from ' + b.name } });
-      } catch (_) { /* bot may be stale after a server wipe — ignore */ }
-    }
-    await poll();
-  };
-
-  const vt = $('#tt-vote');
-  if (vt) vt.onclick = async () => {
-    for (const b of testStore.ids) {
-      for (const sid of shuffleArr((state.songs || []).map((x) => x.sid))) {
-        try { await api('/api/vote', { playerId: b.id, sid }); break; } catch (_) { /* own song — try next */ }
+      for (let i = 0; i < n; i++) {
+        const name = 'Test ' + (bots.length + added.length + 1);
+        const j = await api('/api/join', { name, bot: true }); // bot votes score 250 vs 500
+        added.push({ id: j.playerId, name });
       }
+    } catch (e) { toast(e.message); }
+    if (added.length) {
+      testStore.ids = [...bots, ...added];
+      toast(added.length === 1 ? `${added[0].name} joined 🎭` : `${added.length} test players joined 🎭`, false);
     }
     await poll();
   };
@@ -399,7 +598,7 @@ function renderPlayers(s) {
 function renderHistory(s) {
   $('#history-list').innerHTML = s.history.map((h) => {
     const t = h.track.manual ? esc(h.track.manual) : `${esc(h.track.name)} — ${esc(h.track.artists)}`;
-    return `<li><span class="muted">R${h.round} · ${esc(h.category)}:</span> 🏆 ${t}${h.by ? ` <span class="muted">(${esc(h.by)})</span>` : ''} (${h.votes} vote${h.votes === 1 ? '' : 's'}${h.tie ? ' · 🎲 tie-break' : ''})</li>`;
+    return `<li><span class="muted">R${h.round} · ${esc(h.category)}:</span> 🏆 ${t}${h.by ? ` <span class="muted">(${esc(h.by)})</span>` : ''} (${h.points != null ? h.points.toLocaleString() + ' pts · ' : ''}${h.votes} vote${h.votes === 1 ? '' : 's'}${h.tie ? ' · 🎲 tie-break' : ''})</li>`;
   }).join('');
 }
 
@@ -511,10 +710,8 @@ function renderSubmitting(s) {
     </div>`;
   $('#submit-song-btn').onclick = async () => {
     if (!staged) return;
-    const raw = $('#snippet-input') ? $('#snippet-input').value : '';
-    const sec = parseTime(raw);
-    if (raw.trim() && sec == null) return toast('Snippet start: use m:ss (e.g. 1:05) or seconds');
-    const chosen = { ...staged, startSec: sec };
+    // Snippet start = wherever they left the player (play or drag); untouched = auto.
+    const chosen = { ...staged, startSec: ypPosMs != null ? Math.floor(ypPosMs / 1000) : null };
     staged = null; // clear before the post-submit poll so the button state refreshes
     await submitTrack(chosen);
   };
@@ -607,14 +804,6 @@ function trackLabel(t) {
 // ---------------- snippet helpers ----------------
 const SNIP_SEC = 15; // snippet length in seconds, used everywhere (voting, previews, final mix)
 function fmtTime(sec) { return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`; }
-function parseTime(v) {
-  v = (v || '').trim();
-  if (!v) return null; // blank = auto
-  const m = v.match(/^(\d+):([0-5]?\d)$/);
-  if (m) return +m[1] * 60 + +m[2];
-  const n = parseInt(v, 10);
-  return Number.isFinite(n) && n >= 0 ? n : null;
-}
 // Auto snippet start: ~35% into the track usually lands near a chorus.
 function snippetStart(t) {
   if (t.startSec != null) return t.startSec;
@@ -628,15 +817,14 @@ function stageTrack(t) {
   if (!yp) return;
   yp.dataset.key = 'staged:' + (t.id || t.name);
   try { if (ypCtl) ypCtl.destroy(); } catch (_) {}
-  ypCtl = null;
+  ypCtl = null; ypPosMs = null;
   yp.innerHTML = `
     <div class="your-pick-banner">🎵 Selected: <b>${trackLabel(t)}</b> <span class="muted">— hit Submit below to lock it in</span>
       ${t.id ? `
         <div id="yp-embed"></div>
-        <span class="muted tiny-note">Playing at: <b id="yp-pos">0:00</b> — that's the number to put in the box.</span>
+        <span class="muted tiny-note">Snippet start: <b id="yp-start">auto (~${fmtTime(snippetStart(t))})</b> — play or drag the player to the moment you want; Submit locks that spot in.</span>
         <div class="row snippet-row">
-          <input id="snippet-input" autocomplete="off" data-1p-ignore data-lpignore="true" placeholder="Snippet start m:ss (blank = auto)">
-          <button id="yp-preview" class="btn small ghost">▶ Preview</button>
+          <button id="yp-preview" class="btn small ghost">▶ Preview my ${SNIP_SEC}s snippet</button>
         </div>` : ''}
     </div>`;
   if (t.id) setupYourPickPlayer(t);
@@ -647,9 +835,10 @@ function stageTrack(t) {
   }
 }
 
-// Your-pick preview: an embed of the submitter's own song so they can find
-// the right snippet start; ▶ Preview plays their chosen window.
+// Your-pick player: an embed of the submitter's own song. Wherever they play or drag
+// it to IS the snippet start — no typing. Submit (or 📍) locks the current spot in.
 let ypCtl = null;
+let ypPosMs = null; // last position (ms) the player was left at; null = never touched → auto
 function setupYourPickPlayer(t) {
   const slot = $('#yp-embed');
   ensureEmbedApi((embApi) => {
@@ -659,20 +848,22 @@ function setupYourPickPlayer(t) {
     embApi.createController(holder, { uri: 'spotify:track:' + t.id, height: 80 }, (ctl) => {
       ypCtl = ctl;
       ctl.addListener('playback_update', (e) => {
-        const el = $('#yp-pos');
-        if (!el || !e || !e.data) return;
+        if (!e || !e.data) return;
         const ms = e.data.position ?? e.data.progress ?? 0;
-        el.textContent = fmtTime(Math.floor(ms / 1000));
+        if (ms <= 0) return;
+        ypPosMs = ms;
+        const el = $('#yp-start');
+        if (el) el.textContent = fmtTime(Math.floor(ms / 1000));
       });
       const prev = $('#yp-preview');
       if (prev) prev.onclick = () => {
-        const typed = parseTime($('#snippet-input').value);
-        const start = typed != null ? typed : snippetStart(t);
+        const start = ypPosMs != null ? Math.floor(ypPosMs / 1000) : snippetStart(t);
         ctl.seek(start);
         ctl.play();
         if (start) setTimeout(() => ctl.seek(start), 900);
         clearTimeout(setupYourPickPlayer._t);
-        setupYourPickPlayer._t = setTimeout(() => ctl.pause(), SNIP_SEC * 1000 + 1000);
+        // After the preview window, park the player back on the chosen spot.
+        setupYourPickPlayer._t = setTimeout(() => { ctl.pause(); ctl.seek(start); ypPosMs = start * 1000; }, SNIP_SEC * 1000 + 1000);
       };
     });
   });
@@ -697,60 +888,61 @@ function ensureEmbedApi(cb) {
 }
 
 function renderVoting(s) {
+  mix.stop = true; // kill any listening party still running from a previous round
   root().innerHTML = `
     <div class="card">
       <div class="cat-banner">Category: <b>${esc(s.category)}</b></div>
       <h2>Vote for the best 🗳️</h2>
       <p class="muted" id="vote-progress"></p>
       <p class="muted">Votes are anonymous. You can't vote for your own.</p>
-      ${s.you.isHost ? `
-        <div class="row center-row">
-          <button id="listen-play" class="btn primary">▶ Play the choices (${SNIP_SEC}s each)</button>
-          <button id="listen-stop" class="btn ghost hidden">■ Stop</button>
-        </div>
-        <div id="listen-status" class="cat-banner hidden"></div>
-        <div id="listen-progress" class="snip-progress hidden"><div class="prog-track"><div class="prog-fill" id="listen-fill"></div></div><span class="muted" id="listen-time"></span></div>
-        <div id="listen-embed" class="hidden"></div>` : ''}
+      <div class="row center-row">
+        <button id="listen-play" class="btn primary">▶ Play the choices (${SNIP_SEC}s each)</button>
+        <button id="listen-stop" class="btn ghost hidden">■ Stop</button>
+      </div>
+      <div id="listen-status" class="cat-banner hidden"></div>
+      <div id="listen-progress" class="snip-progress hidden"><div class="prog-track"><div class="prog-fill" id="listen-fill"></div></div><span class="muted" id="listen-time"></span></div>
+      <div id="listen-embed" class="hidden"></div>
       <div id="ballot">
         ${s.songs.map((song) => `
-          <div class="song-card ${song.mine ? 'mine' : ''}" id="song-${song.sid}">
+          <div class="song-card" id="song-${song.sid}">
             ${song.track.id
               ? `<div class="embed-slot" data-sid="${esc(song.sid)}" data-tid="${esc(song.track.id)}"></div>`
               : `<div class="manual-track">🎵 ${trackLabel(song.track)}</div>`}
             <div class="song-actions">
               ${song.track.id ? `<button class="btn small ghost snip-btn" data-sid="${esc(song.sid)}" data-start="${snippetStart(song.track)}">▶ ${SNIP_SEC}s snippet</button>` : ''}
-              ${song.mine ? '<span class="chip tiny">your pick</span>' : ''}
-              ${!song.mine || s.players.length === 1
-                ? `<button class="btn small vote-btn" data-sid="${esc(song.sid)}">Vote</button>`
-                : ''}
+              <button class="btn small vote-btn" data-sid="${esc(song.sid)}">Vote</button>
             </div>
-            ${song.mine && song.track.id ? `
-              <span class="muted tiny-note pos-note">Playing at: <b id="pos-${esc(song.sid)}">0:00</b> — that's the number to put in the box.</span>
-              <div class="row snippet-row">
-                <input id="vote-snippet" autocomplete="off" data-1p-ignore data-lpignore="true" placeholder="${SNIP_SEC}s snippet start time (m:ss, blank = auto)" value="${song.track.startSec != null ? fmtTime(song.track.startSec) : ''}">
-                <button id="vote-snippet-save" class="btn small ghost">Set</button>
-              </div>` : ''}
           </div>`).join('')}
       </div>
       ${s.you.isHost ? '<div id="vote-board"></div>' : ''}
     </div>`;
   const lp = $('#listen-play');
-  if (lp) {
-    lp.onclick = () => playSet(
-      (state.songs || []).map((song) => ({ track: song.track, label: `<b>${trackLabel(song.track)}</b>`, sid: song.sid })),
-      {
-        playBtn: lp,
-        stopBtn: $('#listen-stop'),
-        status: (h) => { const el = $('#listen-status'); if (el) { el.classList.remove('hidden'); el.innerHTML = h; } },
-        highlight: (it) => {
-          document.querySelectorAll('#ballot .song-card').forEach((c) => c.classList.remove('now'));
-          if (it) { const c = $('#song-' + it.sid); if (c) c.classList.add('now'); }
-        },
-        embedSlot: () => $('#listen-embed'),
-        progress: snipProgress('listen'),
-        doneMsg: "That's the ballot — cast your votes! 🗳️",
-      });
-    $('#listen-stop').onclick = stopSet;
+  const startParty = () => playSet(
+    (state.songs || []).map((song) => ({ track: song.track, label: `<b>${trackLabel(song.track)}</b>`, sid: song.sid })),
+    {
+      playBtn: lp,
+      stopBtn: $('#listen-stop'),
+      status: (h) => { const el = $('#listen-status'); if (el) { el.classList.remove('hidden'); el.innerHTML = h; } },
+      highlight: (it) => {
+        document.querySelectorAll('#ballot .song-card').forEach((c) => c.classList.remove('now'));
+        if (it) { const c = $('#song-' + it.sid); if (c) c.classList.add('now'); }
+      },
+      embedSlot: () => $('#listen-embed'),
+      progress: snipProgress('listen'),
+      doneMsg: "That's the ballot — cast your votes! 🗳️",
+    });
+  lp.onclick = startParty;
+  $('#listen-stop').onclick = stopSet;
+  // The listening party starts itself on every device, not just the host's.
+  // (If the browser blocks the auto-start, the Play button is right there.)
+  if (!s.yourVote) {
+    let tries = 0;
+    const kick = () => {
+      if (!state || state.phase !== 'voting') return; // round moved on before we got going
+      if (!mix.running) startParty();
+      else if (++tries < 5) setTimeout(kick, 800);
+    };
+    setTimeout(kick, 1200);
   }
   root().querySelectorAll('.vote-btn').forEach((b) => {
     b.onclick = async () => {
@@ -761,17 +953,6 @@ function renderVoting(s) {
       } catch (e) { toast(e.message); }
     };
   });
-  const snipSave = $('#vote-snippet-save');
-  if (snipSave) snipSave.onclick = async () => {
-    const v = $('#vote-snippet').value;
-    const sec = parseTime(v);
-    if (v.trim() && sec == null) return toast('Use m:ss (e.g. 1:05) or seconds');
-    try {
-      await api('/api/snippet', { playerId: pid(), startSec: sec });
-      toast(sec == null ? 'Snippet back to auto ✓' : `Snippet starts at ${fmtTime(sec)} ✓`, false);
-      await poll();
-    } catch (e) { toast(e.message); }
-  };
   wireSnippets();
   updateInPlace(s);
 }
@@ -779,7 +960,9 @@ function renderVoting(s) {
 // Turn embed slots into controllable players; snippet buttons seek to the start
 // point and auto-pause after 30 seconds. Falls back to plain embeds if the
 // iFrame API can't load (snippets then use Spotify's own preview clip).
+let embedPos = {}; // sid -> last playback position (ms) from that card's embed, fed by drags/plays
 function wireSnippets() {
+  embedPos = {};
   const slots = [...root().querySelectorAll('.embed-slot')];
   if (!slots.length) return;
   const controllers = {};
@@ -806,10 +989,9 @@ function wireSnippets() {
       api.createController(holder, { uri: 'spotify:track:' + tid, height: 80 }, (c) => {
         controllers[sid] = c;
         c.addListener('playback_update', (e) => {
-          const posEl = $('#pos-' + sid);
-          if (!posEl || !e || !e.data) return;
+          if (!e || !e.data) return;
           const ms = e.data.position ?? e.data.progress ?? 0;
-          posEl.textContent = fmtTime(Math.floor(ms / 1000));
+          if (ms > 0) embedPos[sid] = ms;
         });
       });
     });
@@ -834,11 +1016,13 @@ function wireSnippets() {
 }
 
 function renderResults(s) {
-  const sorted = s.songs.slice().sort((a, b) => b.votes - a.votes);
+  mix.stop = true; // voting's listening party ends with the round
+  const sorted = s.songs.slice().sort((a, b) => b.points - a.points);
   root().innerHTML = `
     <div class="card">
       <div class="cat-banner">Category: <b>${esc(s.category)}</b></div>
       <h2>Results 🏁</h2>
+      <p class="muted center">Every vote is worth <b>500 pts</b> (bot votes 250). Most points takes the round.</p>
       ${s.tieCount > 1 ? `<div class="cat-banner">🎲 <b>${s.tieCount}-way tie</b> at the top — winner drawn at random!</div>` : ''}
       ${s.youWon
         ? `<div class="win-banner">🏆 <b>You won this round!</b>${s.tieCount > 1 ? ' (won the random draw)' : ''}${s.revealed ? '' : ' Keep a poker face while they guess. 🤫'}</div>`
@@ -850,16 +1034,19 @@ function renderResults(s) {
         ${sorted.map((song) => `
           <div class="song-card ${song.winner ? 'winner' : ''}">
             <div class="result-row">
-              <span class="vote-count">${song.votes}</span>
+              <span class="vote-count"><b class="pts-num" data-target="${song.points || 0}">0</b><span class="pts-label">pts</span></span>
               <div class="tmeta">
                 ${song.winner ? '🏆 ' : ''}<b>${trackLabel(song.track)}</b>
                 ${song.tied ? '<span class="chip tiny tie-chip">🎲 tied</span>' : ''}
-                <span class="muted">${song.by ? `${esc(song.by)}'s pick` : 'whose pick…?'}${song.mine ? ' <span class="chip tiny">you</span>' : ''}</span>
+                <span class="muted">${song.votes} vote${song.votes === 1 ? '' : 's'} · ${song.by ? `${esc(song.by)}'s pick` : 'whose pick…?'}${song.mine && s.revealed ? ' <span class="chip tiny">you</span>' : ''}</span>
               </div>
             </div>
             ${song.track.id ? `<div class="embed-slot" data-sid="${esc(song.sid)}" data-tid="${esc(song.track.id)}"></div>` : ''}
           </div>`).join('')}
       </div>
+      ${s.revealed && s.scores && s.scores.length ? `
+        <div class="standings"><span class="muted">Standings:</span> ${s.scores.map((r, i) =>
+          `<span class="vb ${i === 0 ? 'in' : ''}">${i === 0 ? '👑 ' : ''}${esc(r.name)} <b>${r.points.toLocaleString()}</b></span>`).join('')}</div>` : ''}
       ${s.youWon
         ? '<button id="next-btn" class="btn primary">You won — pick the next category →</button>'
         : s.you.isHost
@@ -871,6 +1058,36 @@ function renderResults(s) {
   const rv = $('#reveal-btn');
   if (rv) rv.onclick = () => api('/api/reveal', { playerId: store.playerId }).then(poll).catch((e) => toast(e.message));
   wireSnippets(); // embed players (artwork + play) on the result cards
+  animatePoints(root()); // roll the totals up, last place first, winner lands last
+}
+
+// Count-up drama for point totals: lowest cards tick up first, the winner lands last
+// and pops. Re-runs whenever the screen renders (fresh results and again on reveal).
+function animatePoints(scope) {
+  const els = [...scope.querySelectorAll('.pts-num')];
+  els.forEach((el, i) => {
+    const target = +el.dataset.target || 0;
+    const delay = (els.length - 1 - i) * 300; // DOM order = highest first, so winner waits longest
+    const dur = 1100;
+    const land = () => {
+      el.textContent = target.toLocaleString();
+      const card = el.closest('.song-card.winner, .lead-row.first');
+      if (card) card.classList.add('pop');
+    };
+    const t0 = performance.now() + delay;
+    const step = (now) => {
+      if (!document.contains(el)) return;
+      if (now < t0) return requestAnimationFrame(step);
+      const k = Math.min(1, (now - t0) / dur);
+      const eased = 1 - Math.pow(1 - k, 3);
+      el.textContent = Math.round(target * eased).toLocaleString();
+      if (k < 1) return requestAnimationFrame(step);
+      land();
+    };
+    requestAnimationFrame(step);
+    // Backgrounded tabs throttle animation frames — always land on the real total.
+    setTimeout(() => { if (document.contains(el)) land(); }, delay + dur + 600);
+  });
 }
 
 // ---------------- Final Mix (DJ set of round winners) ----------------
@@ -880,9 +1097,20 @@ function renderFinale(s) {
   mix.stop = true; // cancel any prior run's loop before rebuilding the screen
   const list = s.history;
   const playable = list.filter((h) => h.track.id).length;
+  const champ = s.scores && s.scores.length ? s.scores[0] : null;
   root().innerHTML = `
     <div class="card">
       <h2>🎬 The Final Mix</h2>
+      ${champ ? `<div class="win-banner">👑 <b>${esc(champ.name)}</b> wins the game with <b>${champ.points.toLocaleString()} pts</b>!</div>` : ''}
+      ${s.scores && s.scores.length ? `
+        <div class="leaderboard">
+          ${s.scores.map((r, i) => `
+            <div class="lead-row ${i === 0 ? 'first' : ''}">
+              <span class="lead-rank">${i === 0 ? '👑' : i + 1}</span>
+              <span class="lead-name">${esc(r.name)}${r.isBot ? ' <span class="chip tiny">bot</span>' : ''}</span>
+              <span class="vote-count"><b class="pts-num" data-target="${r.points}">0</b><span class="pts-label">pts</span></span>
+            </div>`).join('')}
+        </div>` : ''}
       <p class="muted">${list.length} round winner${list.length === 1 ? '' : 's'} · ${SNIP_SEC}s each · ~${Math.round((list.length * SNIP_SEC / 60) * 10) / 10} min set</p>
       <div id="mix-status" class="cat-banner hidden"></div>
       <div id="mix-progress" class="snip-progress hidden"><div class="prog-track"><div class="prog-fill" id="mix-fill"></div></div><span class="muted" id="mix-time"></span></div>
@@ -925,6 +1153,7 @@ function renderFinale(s) {
     </div>`;
   const plb = $('#playlist-btn');
   if (plb) plb.onclick = () => createFinalPlaylist(list);
+  animatePoints(root());
   $('#mix-play').onclick = () => playSet(
     list.map((h, i) => ({ track: h.track, label: `<b>${trackLabel(h.track)}</b> <span class="muted">(${esc(h.category)})</span>`, idx: i })),
     {
@@ -1099,6 +1328,7 @@ async function sdkPlaySnippet(t) {
 function embedPlaySnippet(t, slot) {
   return new Promise((resolve) => {
     if (!slot || !document.contains(slot)) return resolve();
+    waitMs(SNIP_SEC * 1000 + 9000).then(resolve); // blocked/hung embed must not stall the set (stops early on ■)
     slot.classList.remove('hidden');
     // The embed lives inside one screen's slot — if that screen was re-rendered, rebuild it.
     if (mix.embedHost && !document.contains(mix.embedHost)) {
@@ -1145,28 +1375,24 @@ function updateInPlace(s) {
       yp.dataset.key = ypKey;
       const t = s.yourSubmission;
       try { if (ypCtl) ypCtl.destroy(); } catch (_) {}
-      ypCtl = null;
+      ypCtl = null; ypPosMs = null;
       if (!t) yp.innerHTML = '';
       else {
         yp.innerHTML = `
           <div class="your-pick-banner">✓ Your pick: <b>${trackLabel(t)}</b> <span class="muted">(pick another to swap)</span>
             ${t.id ? `
               <div id="yp-embed"></div>
-              <span class="muted tiny-note">Playing at: <b id="yp-pos">0:00</b> — that's the number to put in the box.</span>
+              <span class="muted tiny-note">Voting plays a ${SNIP_SEC}s snippet starting at <b id="yp-start">${t.startSec != null ? fmtTime(t.startSec) : `auto (~${fmtTime(snippetStart(t))})`}</b>. Play or drag to a new spot, then:</span>
               <div class="row snippet-row">
-                <input id="snippet-input" autocomplete="off" data-1p-ignore data-lpignore="true" placeholder="Snippet start m:ss (blank = auto)" value="${t.startSec != null ? fmtTime(t.startSec) : ''}">
-                <button id="snippet-save" class="btn small ghost">Set</button>
-                <button id="yp-preview" class="btn small ghost">▶ Preview</button>
+                <button id="snippet-save" class="btn small ghost">📍 Set snippet to current spot</button>
+                <button id="yp-preview" class="btn small ghost">▶ Preview my ${SNIP_SEC}s snippet</button>
               </div>
-              <span class="muted tiny-note">Voting plays a ${SNIP_SEC}s snippet — auto-picked${t.startSec != null ? `, yours starts at ${fmtTime(t.startSec)}` : ''} unless you set a start time.</span>
             ` : ''}
           </div>`;
         const save = $('#snippet-save');
         if (save) save.onclick = () => {
-          const v = $('#snippet-input').value;
-          const sec = parseTime(v);
-          if (v.trim() && sec == null) return toast('Use m:ss (e.g. 1:05) or seconds');
-          submitTrack({ ...t, startSec: sec });
+          if (ypPosMs == null) return toast('Play or drag your song to the spot you want first');
+          submitTrack({ ...t, startSec: Math.floor(ypPosMs / 1000) });
         };
         if (t.id) setupYourPickPlayer(t);
       }
@@ -1183,7 +1409,7 @@ function updateInPlace(s) {
     const vb = $('#vote-board');
     if (vb) vb.innerHTML = '<span class="muted">Votes in:</span> ' + s.players.map((p) =>
       `<span class="vb ${p.voted ? 'in' : ''}">${esc(p.name)} ${p.voted ? '✓' : '…'}</span>`).join('');
-    // Snippet starts can change mid-vote — refresh the play buttons (never the input).
+    // Snippet starts can change mid-vote — refresh the play buttons.
     (s.songs || []).forEach((song) => {
       const b = root().querySelector(`.snip-btn[data-sid="${song.sid}"]`);
       if (b) b.dataset.start = snippetStart(song.track);

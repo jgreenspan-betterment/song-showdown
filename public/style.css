@@ -190,10 +190,29 @@ summary:hover { color: #fff; }
 /* ---------- results ---------- */
 .result-row { display: flex; align-items: center; gap: 14px; }
 .vote-count {
-  font-size: 24px; font-weight: 900; min-width: 36px; text-align: center;
+  font-size: 24px; font-weight: 900; min-width: 64px; text-align: center;
   color: var(--green); letter-spacing: -0.02em;
+  display: flex; flex-direction: column; align-items: center; line-height: 1.05;
 }
 .song-card.winner .vote-count { color: var(--gold); }
+.pts-num { font-variant-numeric: tabular-nums; }
+.pts-label { font-size: 10px; font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase; opacity: .7; }
+@keyframes winner-pop { 0% { transform: scale(1); } 45% { transform: scale(1.035); } 100% { transform: scale(1); } }
+.song-card.pop, .lead-row.pop { animation: winner-pop .6s ease; }
+.standings { margin: 14px 0 6px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 13px; }
+
+/* ---------- final leaderboard ---------- */
+.leaderboard { margin: 6px 0 16px; display: flex; flex-direction: column; gap: 6px; }
+.lead-row {
+  display: flex; align-items: center; gap: 12px; padding: 10px 14px;
+  background: var(--panel-2); border: 1px solid transparent; border-radius: var(--radius);
+}
+.lead-row.first { border-color: var(--gold); background: #221c10; }
+.lead-row.first .vote-count { color: var(--gold); }
+.lead-rank { min-width: 28px; text-align: center; font-weight: 900; color: var(--muted); }
+.lead-row.first .lead-rank { color: var(--gold); }
+.lead-name { flex: 1; font-weight: 800; font-size: 15px; }
+.lead-row .vote-count { font-size: 20px; min-width: 72px; }
 .mix-art { width: 48px; height: 48px; border-radius: 4px; flex-shrink: 0; }
 .mix-round {
   min-width: 84px; max-width: 110px; text-align: center; color: var(--green);
@@ -239,6 +258,8 @@ summary:hover { color: #fff; }
 #ap-identity.imp { border-color: var(--gold); background: #241d0d; }
 .tt-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; }
 #admin-panel .tt-row .btn { width: auto; }
+.tt-count { max-width: 76px; padding: 8px 12px; font-size: 13px; text-align: center; }
+.tt-hint { font-size: 12px; font-weight: 500; margin: 2px 0; }
 
 /* ---------- stepper: preset chips, current = white ---------- */
 #stepper {
