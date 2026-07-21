@@ -860,7 +860,8 @@ function setupYourPickPlayer(t) {
         const start = ypPosMs != null ? Math.floor(ypPosMs / 1000) : snippetStart(t);
         ctl.seek(start);
         ctl.play();
-        if (start) setTimeout(() => ctl.seek(start), 900);
+        // Correct only if the embed audibly started from 0 — a blind re-seek restarts playback.
+        if (start > 4) setTimeout(() => { if (ypPosMs != null && ypPosMs < 2000) ctl.seek(start); }, 1100);
         clearTimeout(setupYourPickPlayer._t);
         // After the preview window, park the player back on the chosen spot.
         setupYourPickPlayer._t = setTimeout(() => { ctl.pause(); ctl.seek(start); ypPosMs = start * 1000; }, SNIP_SEC * 1000 + 1000);
@@ -929,14 +930,18 @@ function renderVoting(s) {
   });
   lp.onclick = startParty;
   $('#listen-stop').onclick = stopSet;
-  // The listening party starts itself on every device, not just the host's.
+  // The listening party starts itself on every device, not just the host's — but only
+  // in the tab the player is actually looking at, and only once per round.
   // (If the browser blocks the auto-start, the Play button is right there.)
+  voteParty.round = s.round; voteParty.played = false; voteParty.start = startParty;
   if (!s.yourVote) {
     let tries = 0;
     const kick = () => {
-      if (!state || state.phase !== 'voting') return; // round moved on before we got going
-      if (!mix.running) startParty();
-      else if (++tries < 5) setTimeout(kick, 800);
+      if (!state || state.phase !== 'voting' || state.yourVote) return; // round moved on
+      if (document.hidden) return; // hidden tab: visibilitychange starts it if they come back
+      if (mix.running) { if (++tries < 5) setTimeout(kick, 800); return; }
+      voteParty.played = true;
+      startParty();
     };
     setTimeout(kick, 1200);
   }
@@ -956,11 +961,11 @@ function renderVoting(s) {
 // Turn embed slots into controllable players; snippet buttons seek to the start
 // point and auto-pause after 30 seconds. Falls back to plain embeds if the
 // iFrame API can't load (snippets then use Spotify's own preview clip).
-let embedPos = {}; // sid -> last playback position (ms) from that card's embed, fed by drags/plays
+let embedState = {}; // sid -> {pos, paused, at}: freshest playback report from that card's embed
 let ballotCtls = {}; // sid -> embed controller for this screen's cards (the party plays through these)
 let ballotDead = false; // iframe API blocked → plain embeds, no programmatic playback
 function wireSnippets() {
-  embedPos = {};
+  embedState = {};
   ballotCtls = {};
   ballotDead = false;
   const slots = [...root().querySelectorAll('.embed-slot')];
@@ -993,7 +998,7 @@ function wireSnippets() {
         c.addListener('playback_update', (e) => {
           if (!e || !e.data) return;
           const ms = e.data.position ?? e.data.progress ?? 0;
-          if (ms > 0) embedPos[sid] = ms;
+          embedState[sid] = { pos: ms, paused: !!e.data.isPaused, at: Date.now() };
         });
       });
     });
@@ -1011,25 +1016,53 @@ function wireSnippets() {
       active = c;
       const start = +b.dataset.start || 0;
       c.seek(start);
-      c.play();
-      if (start) setTimeout(() => c.seek(start), 900); // some embeds start at 0 on first play
+      ensurePlaying(c, b.dataset.sid, start, () => active !== c);
       clearTimeout(stopTimer);
-      stopTimer = setTimeout(() => c.pause(), SNIP_SEC * 1000 + 1000);
+      stopTimer = setTimeout(() => { if (active === c) c.pause(); }, SNIP_SEC * 1000 + 1000);
     };
   });
 }
 
+// Start a card's embed at `start` sec and confirm audio is actually moving. Embeds drop
+// commands while their iframe boots, and some ignore the pre-play seek — so retry the
+// play, and only correct the position when the reported position is clearly wrong
+// (a blind mid-play re-seek restarts or kills playback on some clients).
+async function ensurePlaying(ctl, sid, start, cancelled) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (cancelled() || mix.stop) return false;
+    const mark = Date.now();
+    ctl.play();
+    let ok = false;
+    while (Date.now() - mark < 2500) {
+      if (cancelled() || mix.stop) return false;
+      const st = embedState[sid];
+      if (st && st.at >= mark && !st.paused) { ok = true; break; }
+      await waitMs(150);
+    }
+    if (!ok) continue; // iframe wasn't listening yet — try again
+    if (start > 4) {
+      const st = embedState[sid];
+      if (st && st.pos < 2000) ctl.seek(start); // started from 0: correct it once
+    }
+    return true;
+  }
+  return false;
+}
+
 // Voting listening party: plays each ballot card's own embed in order — no SDK,
 // no hidden player, no Spotify Connect takeover. The active card lights up and
-// its embed visibly plays, identically on every player's device.
+// its embed visibly plays, identically on every player's device. If something
+// else keeps stealing the account's stream (Spotify allows ONE stream per
+// account — another tab, the desktop app, a phone), we say so instead of
+// ghosting through silent snippets.
 async function playBallot(ui) {
   if (mix.running) return;
   const items = (state.songs || []).filter((x) => x.track.id);
   if (!items.length) return;
-  mix.running = true; mix.stop = false;
+  mix.running = true; mix.stop = false; mix.kind = 'ballot';
   ui.playBtn.classList.add('hidden');
   ui.stopBtn.classList.remove('hidden');
-  let current = null;
+  let current = null, interrupted = false;
   try {
     for (let i = 0; i < items.length; i++) {
       if (mix.stop || ballotDead) break;
@@ -1043,26 +1076,50 @@ async function playBallot(ui) {
       const start = snippetStart(it.track);
       current = ctl;
       ctl.seek(start);
-      ctl.play();
-      if (start) setTimeout(() => { if (!mix.stop && current === ctl) ctl.seek(start); }, 900);
+      const started = await ensurePlaying(ctl, it.sid, start, () => current !== ctl);
+      if (!started) { if (mix.stop) break; continue; } // dead player: move on, don't burn 15s
       const t0 = Date.now();
-      const tick = setInterval(() => { if (ui.progress) ui.progress(Math.min(SNIP_SEC * 1000, Date.now() - t0), SNIP_SEC * 1000); }, 200);
-      await waitMs(SNIP_SEC * 1000);
-      clearInterval(tick);
-      if (current === ctl) ctl.pause();
+      let resumed = false;
+      while (Date.now() - t0 < SNIP_SEC * 1000 && !mix.stop) {
+        await waitMs(200);
+        if (ui.progress) ui.progress(Math.min(SNIP_SEC * 1000, Date.now() - t0), SNIP_SEC * 1000);
+        const st = embedState[it.sid];
+        if (st && st.paused && st.at > t0 + 1200) {
+          if (!resumed) { resumed = true; ctl.play(); await waitMs(900); continue; } // one resume attempt
+          interrupted = true; // stolen again — something else owns the stream
+          break;
+        }
+      }
+      if (current === ctl && !interrupted) ctl.pause();
+      if (interrupted) break;
     }
-    ui.status(mix.stop ? 'Stopped.' : ballotDead ? 'Tap a player to listen — auto-play is blocked here.' : ui.doneMsg);
+    ui.status(mix.stop ? 'Stopped.'
+      : interrupted ? '⚠️ Playback keeps getting cut — is Spotify playing in another tab, app, or device? Pause it there, then hit ▶ again.'
+      : ballotDead ? 'Tap a player to listen — auto-play is blocked here.'
+      : ui.doneMsg);
   } catch (e) {
     ui.status('Playback hiccup: ' + esc(e.message));
   } finally {
     mix.running = false;
-    try { if (current) current.pause(); } catch (_) {}
+    try { if (current && !interrupted) current.pause(); } catch (_) {}
     ui.highlight(null);
     if (ui.progress) ui.progress(-1, 0);
     ui.playBtn.classList.remove('hidden');
     ui.stopBtn.classList.add('hidden');
   }
 }
+
+// Hidden tabs must never hold the account's single Spotify stream — a background
+// tab auto-playing is exactly what cuts off the tab the player is looking at.
+const voteParty = { round: 0, played: false, start: null }; // this round's auto-party (one shot per tab)
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && mix.running && mix.kind === 'ballot') stopSet();
+  else if (!document.hidden && state && state.phase === 'voting' && !state.yourVote
+    && voteParty.start && !voteParty.played && !mix.running) {
+    voteParty.played = true;
+    setTimeout(voteParty.start, 600);
+  }
+});
 
 function renderResults(s) {
   mix.stop = true; // voting's listening party ends with the round
@@ -1283,7 +1340,7 @@ async function playSet(items, ui) {
   if (mix.running) return;
   const playable = items.filter((it) => it.track.id);
   if (!playable.length) return toast('No Spotify tracks to play');
-  mix.running = true; mix.stop = false;
+  mix.running = true; mix.stop = false; mix.kind = 'set';
   ui.playBtn.classList.add('hidden');
   ui.stopBtn.classList.remove('hidden');
 
@@ -1386,9 +1443,17 @@ function embedPlaySnippet(t, slot) {
     }
     const go = (ctl) => {
       const start = snippetStart(t);
+      const mark = Date.now();
       ctl.seek(start);
       ctl.play();
-      if (start) setTimeout(() => ctl.seek(start), 900);
+      // Iframes drop commands while booting: retry the play, and correct the position
+      // only when the reported position is clearly wrong (blind re-seeks kill playback).
+      setTimeout(() => {
+        const st = mix.embedState;
+        if (mix.stop) return;
+        if (!st || st.at < mark) { ctl.play(); if (start) ctl.seek(start); }
+        else if (start > 4 && st.pos < 2000) ctl.seek(start);
+      }, 1200);
       waitMs(SNIP_SEC * 1000).then(() => { ctl.pause(); resolve(); });
     };
     if (mix.embedCtl) { mix.embedCtl.loadUri('spotify:track:' + t.id); setTimeout(() => go(mix.embedCtl), 600); return; }
@@ -1397,7 +1462,13 @@ function embedPlaySnippet(t, slot) {
       const holder = document.createElement('div');
       slot.appendChild(holder);
       mix.embedHost = slot;
-      api.createController(holder, { uri: 'spotify:track:' + t.id, height: 80 }, (ctl) => { mix.embedCtl = ctl; go(ctl); });
+      api.createController(holder, { uri: 'spotify:track:' + t.id, height: 80 }, (ctl) => {
+        mix.embedCtl = ctl;
+        ctl.addListener('playback_update', (e) => {
+          if (e && e.data) mix.embedState = { pos: e.data.position ?? e.data.progress ?? 0, paused: !!e.data.isPaused, at: Date.now() };
+        });
+        go(ctl);
+      });
     });
   });
 }
