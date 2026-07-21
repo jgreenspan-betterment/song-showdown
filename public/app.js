@@ -1047,6 +1047,23 @@ function stopPreview() {
   snd.token++;
   if (snd.el) { try { snd.el.pause(); } catch (_) {} }
 }
+
+// iOS Safari only plays audio started by a user gesture — timers and async chains
+// (like the auto-party) are blocked cold. But once a gesture-initiated play has
+// "blessed" an element, iOS lets that SAME element play programmatically forever.
+// So: on the player's first tap anywhere (join, pick, submit — long before voting),
+// run a instant silent clip through our shared player to unlock it.
+const SILENT_WAV = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQQAAAAAAA==';
+function unlockAudio() {
+  if (unlockAudio.done) return;
+  const el = snd.el || (snd.el = new Audio());
+  if (!el.paused) { unlockAudio.done = true; return; } // already audibly in use — blessed
+  el.muted = true;
+  el.src = SILENT_WAV;
+  const p = el.play();
+  if (p && p.then) p.then(() => { unlockAudio.done = true; el.pause(); el.muted = false; }).catch(() => { el.muted = false; });
+}
+['touchend', 'mousedown', 'keydown', 'click'].forEach((ev) => document.addEventListener(ev, unlockAudio, true));
 // Plays up to SNIP_SEC of the clip with soft edges. Resolves true if audio actually
 // ran (currentTime moved), false if it never started (blocked / dead link).
 function playPreviewSnippet(url, { cancelled = () => false, onTick = null } = {}) {
@@ -1054,8 +1071,9 @@ function playPreviewSnippet(url, { cancelled = () => false, onTick = null } = {}
     stopPreview();
     const my = ++snd.token;
     const el = snd.el || (snd.el = new Audio());
+    el.muted = false; // the unlock ritual may have left it muted
     el.src = url;
-    el.volume = 0;
+    el.volume = 0; // no-op on iOS (volume is hardware-only there) — plays at full volume, fades elsewhere
     const t0 = Date.now();
     let started = false;
     const done = (ok) => { clearInterval(iv); if (snd.token === my) { try { el.pause(); } catch (_) {} } resolve(ok); };
