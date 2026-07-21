@@ -1016,18 +1016,61 @@ function wireSnippets() {
   let active = null, stopTimer = null;
   root().querySelectorAll('.snip-btn').forEach((b) => {
     b.onclick = async () => {
-      const c = controllers[b.dataset.sid];
-      if (!c) return toast('Player still loading — try again in a second', false);
       // Manual listening takes over from the auto-party (and its final pause).
       if (mix.running) { stopSet(); await new Promise((r) => setTimeout(r, 400)); }
-      if (active && active !== c) active.pause();
+      if (active) { active.pause(); active = null; }
+      clearTimeout(stopTimer);
+      // Preview clip first — the only audio that reliably plays for logged-in listeners.
+      const song = (state && state.songs || []).find((x) => x.sid === b.dataset.sid);
+      if (song && song.track.previewUrl) {
+        if (await playPreviewSnippet(song.track.previewUrl, {})) return;
+      }
+      const c = controllers[b.dataset.sid];
+      if (!c) return toast('Player still loading — try again in a second', false);
+      stopPreview();
       active = c;
       const start = +b.dataset.start || 0;
       c.seek(start);
       ensurePlaying(c, b.dataset.sid, start, () => active !== c);
-      clearTimeout(stopTimer);
       stopTimer = setTimeout(() => { if (active === c) c.pause(); }, SNIP_SEC * 1000 + 1000);
     };
+  });
+}
+
+// ---------------- preview snippets ----------------
+// Plain 30s clips (attached server-side per submission) played through our own
+// <audio>. Unlike logged-in Spotify embeds — whose full-track DRM streams silently
+// lose audio while the UI keeps progressing — a plain clip plays the same for
+// everyone, so it's the first choice for all programmatic playback off the SDK.
+const snd = { el: null, token: 0 };
+function stopPreview() {
+  snd.token++;
+  if (snd.el) { try { snd.el.pause(); } catch (_) {} }
+}
+// Plays up to SNIP_SEC of the clip with soft edges. Resolves true if audio actually
+// ran (currentTime moved), false if it never started (blocked / dead link).
+function playPreviewSnippet(url, { cancelled = () => false, onTick = null } = {}) {
+  return new Promise((resolve) => {
+    stopPreview();
+    const my = ++snd.token;
+    const el = snd.el || (snd.el = new Audio());
+    el.src = url;
+    el.volume = 0;
+    const t0 = Date.now();
+    let started = false;
+    const done = (ok) => { clearInterval(iv); if (snd.token === my) { try { el.pause(); } catch (_) {} } resolve(ok); };
+    const iv = setInterval(() => {
+      if (snd.token !== my || cancelled()) return done(started);
+      const ms = Date.now() - t0;
+      if (onTick) onTick(Math.min(ms, SNIP_SEC * 1000), SNIP_SEC * 1000);
+      if (!started && el.currentTime > 0.05) started = true;
+      const FADE = 400;
+      el.volume = Math.max(0, Math.min(1, Math.min(ms / FADE, (SNIP_SEC * 1000 - ms) / FADE)));
+      if (ms >= SNIP_SEC * 1000 || (started && el.ended)) return done(true);
+      if (!started && ms > 3000) return done(false); // never started — blocked or unreachable
+    }, 100);
+    const p = el.play();
+    if (p && p.catch) p.catch(() => done(false));
   });
 }
 
@@ -1109,8 +1152,19 @@ async function playBallot(ui) {
         const tick = setInterval(() => { if (ui.progress) ui.progress(Math.min(SNIP_SEC * 1000, Date.now() - t0), SNIP_SEC * 1000); }, 200);
         let err = false;
         try { await sdkPlaySnippet(it.track); sdkFails = 0; } catch (_) { err = true; } finally { clearInterval(tick); }
-        if (err && ++sdkFails >= 2) { sdkOk = false; started--; i--; } // SDK died — replay this one via embeds
+        if (err && ++sdkFails >= 2) { sdkOk = false; started--; i--; } // SDK died — retry via clip/embed
         continue;
+      }
+
+      // Preview clip: reliable plain audio, same on every device.
+      if (it.track.previewUrl) {
+        const ok = await playPreviewSnippet(it.track.previewUrl, {
+          cancelled: () => mix.stop,
+          onTick: (p, t) => { if (ui.progress) ui.progress(p, t); },
+        });
+        if (ok) { started++; continue; }
+        if (mix.stop) break;
+        // clip blocked or dead — fall through to the embed
       }
 
       // Embed path: wait for this card's controller (they build asynchronously).
@@ -1377,6 +1431,7 @@ function snipProgress(prefix) {
 
 function stopSet() {
   mix.stop = true;
+  stopPreview();
   if (mix.player) mix.player.pause().catch(() => {});
   if (mix.embedCtl) mix.embedCtl.pause();
 }
@@ -1409,7 +1464,9 @@ async function playSet(items, ui) {
       }, 200);
       try {
         if (sdkOk) await sdkPlaySnippet(it.track);
-        else await embedPlaySnippet(it.track, ui.embedSlot());
+        else if (!(it.track.previewUrl && await playPreviewSnippet(it.track.previewUrl, { cancelled: () => mix.stop }))) {
+          await embedPlaySnippet(it.track, ui.embedSlot());
+        }
       } finally { clearInterval(tick); }
     }
     ui.status(mix.stop ? 'Stopped.' : ui.doneMsg || 'Done!');
@@ -1472,6 +1529,7 @@ async function sdkPlaySnippet(t) {
   await mix.player.setVolume(0).catch(() => {});
   await playerApi('/play?device_id=' + mix.deviceId, { uris: ['spotify:track:' + t.id], position_ms: start * 1000 });
   await rampVolume(0, 1, fadeIn);
+  await mix.player.setVolume(1).catch(() => {}); // a dropped ramp step must not leave the set inaudible
   await waitMs(Math.max(0, SNIP_SEC * 1000 - fadeIn - fadeOut));
   await rampVolume(1, 0, fadeOut);
   await playerApi('/pause?device_id=' + mix.deviceId);

@@ -98,11 +98,38 @@ function cleanTrack(t) {
     album: s(t.album, 160) || null,
     image: /^https:\/\/i\.scdn\.co\//.test(t.image || '') ? t.image : null,
     url: /^https:\/\/open\.spotify\.com\//.test(t.url || '') ? t.url : null,
+    previewUrl: /^https:\/\/[a-z0-9.-]+\.(apple|mzstatic)\.com\//i.test(t.previewUrl || '') ? t.previewUrl.slice(0, 500) : null,
     durationMs: num(t.durationMs, 3600000),
     startSec: t.startSec == null ? null : num(t.startSec, 3600), // null = auto snippet
     fadeIn: t.fadeIn == null ? null : num(t.fadeIn, 8),   // seconds, final-mix fades
     fadeOut: t.fadeOut == null ? null : num(t.fadeOut, 8),
   };
+}
+
+// 30s preview clips via the iTunes Search API. Spotify stopped returning preview
+// URLs for new apps, and programmatic full-track embed playback silently loses its
+// audio for logged-in listeners (DRM + one-stream-per-account). A plain audio clip
+// is the only thing that plays the same on every device, so every submitted song
+// gets one attached at submit time.
+const previewCache = new Map(); // spotify track id -> url | null
+async function findPreview(track) {
+  if (!track || !track.id) return null;
+  if (previewCache.has(track.id)) return previewCache.get(track.id);
+  let url = null;
+  try {
+    const q = encodeURIComponent(`${track.name} ${track.artists || ''}`.slice(0, 100));
+    const ctrl = new AbortController();
+    const tm = setTimeout(() => ctrl.abort(), 2500);
+    const res = await fetch(`https://itunes.apple.com/search?term=${q}&media=music&entity=song&limit=3`, { signal: ctrl.signal });
+    clearTimeout(tm);
+    if (res.ok) {
+      const d = await res.json();
+      const hit = (d.results || []).find(r => r.previewUrl);
+      if (hit) url = hit.previewUrl;
+    }
+  } catch (_) { return null; /* transient — don't cache the miss */ }
+  previewCache.set(track.id, url);
+  return url;
 }
 
 // ---------- phase transitions ----------
@@ -290,11 +317,12 @@ const api = {
     return { ok: true };
   },
 
-  'POST /api/submit': (q, body) => {
+  'POST /api/submit': async (q, body) => {
     const me = player(body.playerId);
     if (!me || game.phase !== 'submitting') throw { code: 409, msg: 'Not accepting submissions' };
     const track = cleanTrack(body.track);
     if (!track) throw { code: 400, msg: 'Invalid song' };
+    if (track.id && !track.previewUrl) track.previewUrl = await findPreview(track);
     const existing = game.submissions.find(s => s.playerId === me.id);
     if (existing) existing.track = track; // can change your pick until voting starts
     else game.submissions.push({ sid: id(), playerId: me.id, track });
