@@ -839,6 +839,7 @@ function stageTrack(t) {
 // it to IS the snippet start — no typing. Submit (or 📍) locks the current spot in.
 let ypCtl = null;
 let ypPosMs = null; // last position (ms) the player was left at; null = never touched → auto
+let ypPaused = false; // freshest paused state from the your-pick embed
 function setupYourPickPlayer(t) {
   const slot = $('#yp-embed');
   ensureEmbedApi((embApi) => {
@@ -849,6 +850,7 @@ function setupYourPickPlayer(t) {
       ypCtl = ctl;
       ctl.addListener('playback_update', (e) => {
         if (!e || !e.data) return;
+        ypPaused = !!e.data.isPaused;
         const ms = e.data.position ?? e.data.progress ?? 0;
         if (ms <= 0) return;
         ypPosMs = ms;
@@ -860,8 +862,14 @@ function setupYourPickPlayer(t) {
         const start = ypPosMs != null ? Math.floor(ypPosMs / 1000) : snippetStart(t);
         ctl.seek(start);
         ctl.play();
-        // Correct only if the embed audibly started from 0 — a blind re-seek restarts playback.
-        if (start > 4) setTimeout(() => { if (ypPosMs != null && ypPosMs < 2000) ctl.seek(start); }, 1100);
+        // Correct only if the embed audibly started from 0 (a blind re-seek restarts
+        // playback), and if the seek knocks the stream out, kick it back on.
+        if (start > 4) setTimeout(() => {
+          if (ypPosMs != null && ypPosMs < 2000) {
+            ctl.seek(start);
+            setTimeout(() => { if (ypPaused) ctl.play(); }, 800);
+          }
+        }, 1100);
         clearTimeout(setupYourPickPlayer._t);
         // After the preview window, park the player back on the chosen spot.
         setupYourPickPlayer._t = setTimeout(() => { ctl.pause(); ctl.seek(start); ypPosMs = start * 1000; }, SNIP_SEC * 1000 + 1000);
@@ -1023,26 +1031,40 @@ function wireSnippets() {
   });
 }
 
-// Start a card's embed at `start` sec and confirm audio is actually moving. Embeds drop
-// commands while their iframe boots, and some ignore the pre-play seek — so retry the
-// play, and only correct the position when the reported position is clearly wrong
-// (a blind mid-play re-seek restarts or kills playback on some clients).
+// Start a card's embed at `start` sec and confirm audio is actually moving.
+// Hard-won timing rules (logged-in full-track embeds are DRM streams and fragile):
+// 1. "Playing" means the reported position ADVANCES — a single un-paused report can
+//    just be the embed announcing intent while it still boots.
+// 2. NEVER seek while the embed is booting — it kills the pending play. Correct the
+//    position only after playback has settled, then verify the seek survived.
 async function ensurePlaying(ctl, sid, start, cancelled) {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   for (let attempt = 0; attempt < 3; attempt++) {
-    if (cancelled() || mix.stop) return false;
+    if (cancelled()) return false;
     const mark = Date.now();
     ctl.play();
-    let ok = false;
-    while (Date.now() - mark < 2500) {
-      if (cancelled() || mix.stop) return false;
+    let last = -1, moving = false;
+    while (Date.now() - mark < 3500) {
+      if (cancelled()) return false;
       const st = embedState[sid];
-      if (st && st.at >= mark && !st.paused) { ok = true; break; }
-      await waitMs(150);
+      if (st && st.at >= mark && !st.paused) {
+        if (last >= 0 && st.pos > last + 80) { moving = true; break; }
+        last = st.pos;
+      }
+      await sleep(150);
     }
-    if (!ok) continue; // iframe wasn't listening yet — try again
-    if (start > 4) {
+    if (!moving) continue; // iframe wasn't listening yet — try again
+    if (start > 4 && last < 2500) {
+      // Started near 0 instead of the chosen spot: settle, correct once, verify.
+      await sleep(700);
+      if (cancelled()) return true;
       const st = embedState[sid];
-      if (st && st.pos < 2000) ctl.seek(start); // started from 0: correct it once
+      if (st && !st.paused && st.pos < 4000) {
+        ctl.seek(start);
+        await sleep(700);
+        const st2 = embedState[sid];
+        if (st2 && st2.paused && !cancelled()) ctl.play(); // seek knocked it out — kick it back on
+      }
     }
     return true;
   }
@@ -1062,31 +1084,55 @@ async function playBallot(ui) {
   mix.running = true; mix.stop = false; mix.kind = 'ballot';
   ui.playBtn.classList.add('hidden');
   ui.stopBtn.classList.remove('hidden');
-  let current = null, interrupted = false;
+  let current = null, interrupted = false, started = 0, sdkFails = 0;
+
+  // Connected host with Premium: the Web Playback SDK is the proven game-day player
+  // (full tracks over Spotify Connect, no embed/DRM fragility). Everyone else: embeds.
+  let sdkOk = false;
+  if (spotify.connected) {
+    ui.status('Warming up the decks…');
+    sdkOk = await Promise.race([
+      initMixPlayer().catch(() => false),
+      (async () => { while (!mix.stop) await waitMs(200); return false; })(),
+    ]);
+  }
   try {
     for (let i = 0; i < items.length; i++) {
-      if (mix.stop || ballotDead) break;
+      if (mix.stop || (!sdkOk && ballotDead)) break;
       const it = items[i];
-      // Card embeds build asynchronously — give this one a few seconds to appear.
+      ui.highlight(it);
+      ui.status(`Now playing ${i + 1}/${items.length}: <b>${trackLabel(it.track)}</b>`);
+
+      if (sdkOk) {
+        started++;
+        const t0 = Date.now();
+        const tick = setInterval(() => { if (ui.progress) ui.progress(Math.min(SNIP_SEC * 1000, Date.now() - t0), SNIP_SEC * 1000); }, 200);
+        let err = false;
+        try { await sdkPlaySnippet(it.track); sdkFails = 0; } catch (_) { err = true; } finally { clearInterval(tick); }
+        if (err && ++sdkFails >= 2) { sdkOk = false; started--; i--; } // SDK died — replay this one via embeds
+        continue;
+      }
+
+      // Embed path: wait for this card's controller (they build asynchronously).
       for (let w = 0; w < 15 && !ballotCtls[it.sid] && !mix.stop && !ballotDead; w++) await waitMs(300);
       const ctl = ballotCtls[it.sid];
       if (!ctl || mix.stop) continue;
-      ui.highlight(it);
-      ui.status(`Now playing ${i + 1}/${items.length}: <b>${trackLabel(it.track)}</b>`);
       const start = snippetStart(it.track);
       current = ctl;
-      ctl.seek(start);
-      const started = await ensurePlaying(ctl, it.sid, start, () => current !== ctl);
-      if (!started) { if (mix.stop) break; continue; } // dead player: move on, don't burn 15s
-      const t0 = Date.now();
-      let resumed = false;
-      while (Date.now() - t0 < SNIP_SEC * 1000 && !mix.stop) {
+      ctl.seek(start); // pre-seek is free: booting iframes just drop it
+      const ok = await ensurePlaying(ctl, it.sid, start, () => mix.stop || current !== ctl);
+      if (!ok) { if (mix.stop) break; continue; } // dead player: move on, don't burn 15s
+      started++;
+      const readyAt = Date.now();
+      let resumes = 0;
+      while (Date.now() - readyAt < SNIP_SEC * 1000 && !mix.stop) {
         await waitMs(200);
-        if (ui.progress) ui.progress(Math.min(SNIP_SEC * 1000, Date.now() - t0), SNIP_SEC * 1000);
+        if (ui.progress) ui.progress(Math.min(SNIP_SEC * 1000, Date.now() - readyAt), SNIP_SEC * 1000);
         const st = embedState[it.sid];
-        if (st && st.paused && st.at > t0 + 1200) {
-          if (!resumed) { resumed = true; ctl.play(); await waitMs(900); continue; } // one resume attempt
-          interrupted = true; // stolen again — something else owns the stream
+        if (st && st.paused && st.at > readyAt) {
+          // Externally paused (stream stolen / embed hiccup): kick it back on, twice.
+          if (resumes < 2) { resumes++; ctl.play(); await waitMs(1000); continue; }
+          interrupted = true;
           break;
         }
       }
@@ -1095,12 +1141,13 @@ async function playBallot(ui) {
     }
     ui.status(mix.stop ? 'Stopped.'
       : interrupted ? '⚠️ Playback keeps getting cut — is Spotify playing in another tab, app, or device? Pause it there, then hit ▶ again.'
-      : ballotDead ? 'Tap a player to listen — auto-play is blocked here.'
+      : !started ? 'Auto-play was blocked here — tap ▶ Play the choices, or ▶ on any card.'
       : ui.doneMsg);
   } catch (e) {
     ui.status('Playback hiccup: ' + esc(e.message));
   } finally {
     mix.running = false;
+    if (mix.player) mix.player.pause().catch(() => {});
     try { if (current && !interrupted) current.pause(); } catch (_) {}
     ui.highlight(null);
     if (ui.progress) ui.progress(-1, 0);
@@ -1446,13 +1493,21 @@ function embedPlaySnippet(t, slot) {
       const mark = Date.now();
       ctl.seek(start);
       ctl.play();
-      // Iframes drop commands while booting: retry the play, and correct the position
-      // only when the reported position is clearly wrong (blind re-seeks kill playback).
+      // Iframes drop commands while booting: retry the play first, and only once
+      // playback settles correct a wrong position — never seek mid-boot (it kills
+      // the pending play), and if the seek knocks it out, kick it back on.
       setTimeout(() => {
-        const st = mix.embedState;
         if (mix.stop) return;
-        if (!st || st.at < mark) { ctl.play(); if (start) ctl.seek(start); }
-        else if (start > 4 && st.pos < 2000) ctl.seek(start);
+        const st = mix.embedState;
+        if (!st || st.at < mark) ctl.play();
+        setTimeout(() => {
+          if (mix.stop) return;
+          const st2 = mix.embedState;
+          if (start > 4 && st2 && !st2.paused && st2.pos < 2500) {
+            ctl.seek(start);
+            setTimeout(() => { const st3 = mix.embedState; if (!mix.stop && st3 && st3.paused) ctl.play(); }, 800);
+          }
+        }, 1000);
       }, 1200);
       waitMs(SNIP_SEC * 1000).then(() => { ctl.pause(); resolve(); });
     };
