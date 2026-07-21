@@ -140,11 +140,11 @@ function startVoting() {
 }
 
 function finishRound() {
-  // A human vote is worth 500 points, a bot vote 250. Winner = most points (tie → random).
+  // A human vote is worth 2000 points, a bot vote 250. Winner = most points (tie → random).
   const tally = {}, points = {};
   for (const [voterId, sid] of Object.entries(game.votes)) {
     tally[sid] = (tally[sid] || 0) + 1;
-    points[sid] = (points[sid] || 0) + ((player(voterId) || {}).isBot ? 250 : 500);
+    points[sid] = (points[sid] || 0) + ((player(voterId) || {}).isBot ? 250 : 2000);
   }
   let best = -1, winners = [];
   for (const s of game.submissions) {
@@ -428,7 +428,7 @@ const api = {
       category: String(h.category || '').slice(0, 80),
       track: cleanTrack(h.track) || { manual: 'unknown' },
       votes: Math.max(0, Math.min(99, Math.round(+h.votes) || 0)),
-      points: Math.max(0, Math.min(99000, Math.round(+h.points) || (Math.round(+h.votes) || 0) * 500)),
+      points: Math.max(0, Math.min(999000, Math.round(+h.points) || (Math.round(+h.votes) || 0) * 2000)),
       by: String(h.by || '?').slice(0, 24),
       tie: !!h.tie,
     }));

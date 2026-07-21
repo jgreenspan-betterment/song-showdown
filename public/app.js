@@ -1247,7 +1247,7 @@ function renderResults(s) {
     <div class="card">
       <div class="cat-banner">Category: <b>${esc(s.category)}</b></div>
       <h2>Results 🏁</h2>
-      <p class="muted center">Every vote is worth <b>500 pts</b> (bot votes 250). Most points takes the round.</p>
+      <p class="muted center">Every vote is worth <b>2,000 pts</b> (bot votes 250). Most points takes the round.</p>
       ${s.tieCount > 1 ? `<div class="cat-banner">🎲 <b>${s.tieCount}-way tie</b> at the top — winner drawn at random!</div>` : ''}
       ${s.youWon
         ? `<div class="win-banner">🏆 <b>You won this round!</b>${s.tieCount > 1 ? ' (won the random draw)' : ''}${s.revealed ? '' : ' Keep a poker face while they guess. 🤫'}</div>`
