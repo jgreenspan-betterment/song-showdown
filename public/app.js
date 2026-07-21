@@ -901,7 +901,6 @@ function renderVoting(s) {
       </div>
       <div id="listen-status" class="cat-banner hidden"></div>
       <div id="listen-progress" class="snip-progress hidden"><div class="prog-track"><div class="prog-fill" id="listen-fill"></div></div><span class="muted" id="listen-time"></span></div>
-      <div id="listen-embed" class="hidden"></div>
       <div id="ballot">
         ${s.songs.map((song) => `
           <div class="song-card" id="song-${song.sid}">
@@ -917,20 +916,17 @@ function renderVoting(s) {
       ${s.you.isHost ? '<div id="vote-board"></div>' : ''}
     </div>`;
   const lp = $('#listen-play');
-  const startParty = () => playSet(
-    (state.songs || []).map((song) => ({ track: song.track, label: `<b>${trackLabel(song.track)}</b>`, sid: song.sid })),
-    {
-      playBtn: lp,
-      stopBtn: $('#listen-stop'),
-      status: (h) => { const el = $('#listen-status'); if (el) { el.classList.remove('hidden'); el.innerHTML = h; } },
-      highlight: (it) => {
-        document.querySelectorAll('#ballot .song-card').forEach((c) => c.classList.remove('now'));
-        if (it) { const c = $('#song-' + it.sid); if (c) c.classList.add('now'); }
-      },
-      embedSlot: () => $('#listen-embed'),
-      progress: snipProgress('listen'),
-      doneMsg: "That's the ballot — cast your votes! 🗳️",
-    });
+  const startParty = () => playBallot({
+    playBtn: lp,
+    stopBtn: $('#listen-stop'),
+    status: (h) => { const el = $('#listen-status'); if (el) { el.classList.remove('hidden'); el.innerHTML = h; } },
+    highlight: (it) => {
+      document.querySelectorAll('#ballot .song-card').forEach((c) => c.classList.remove('now'));
+      if (it) { const c = $('#song-' + it.sid); if (c) c.classList.add('now'); }
+    },
+    progress: snipProgress('listen'),
+    doneMsg: "That's the ballot — cast your votes! 🗳️",
+  });
   lp.onclick = startParty;
   $('#listen-stop').onclick = stopSet;
   // The listening party starts itself on every device, not just the host's.
@@ -961,8 +957,12 @@ function renderVoting(s) {
 // point and auto-pause after 30 seconds. Falls back to plain embeds if the
 // iFrame API can't load (snippets then use Spotify's own preview clip).
 let embedPos = {}; // sid -> last playback position (ms) from that card's embed, fed by drags/plays
+let ballotCtls = {}; // sid -> embed controller for this screen's cards (the party plays through these)
+let ballotDead = false; // iframe API blocked → plain embeds, no programmatic playback
 function wireSnippets() {
   embedPos = {};
+  ballotCtls = {};
+  ballotDead = false;
   const slots = [...root().querySelectorAll('.embed-slot')];
   if (!slots.length) return;
   const controllers = {};
@@ -971,6 +971,7 @@ function wireSnippets() {
   const fallback = () => {
     // Only touch the slots captured by THIS call — a stale timer from a previous
     // screen must not convert or strip controls on the current one.
+    ballotDead = true;
     const sids = new Set(slots.map((el) => el.dataset.sid));
     slots.forEach((el) => {
       if (!document.contains(el)) return;
@@ -988,6 +989,7 @@ function wireSnippets() {
       el.appendChild(holder);
       api.createController(holder, { uri: 'spotify:track:' + tid, height: 80 }, (c) => {
         controllers[sid] = c;
+        ballotCtls[sid] = c;
         c.addListener('playback_update', (e) => {
           if (!e || !e.data) return;
           const ms = e.data.position ?? e.data.progress ?? 0;
@@ -1000,9 +1002,11 @@ function wireSnippets() {
 
   let active = null, stopTimer = null;
   root().querySelectorAll('.snip-btn').forEach((b) => {
-    b.onclick = () => {
+    b.onclick = async () => {
       const c = controllers[b.dataset.sid];
       if (!c) return toast('Player still loading — try again in a second', false);
+      // Manual listening takes over from the auto-party (and its final pause).
+      if (mix.running) { stopSet(); await new Promise((r) => setTimeout(r, 400)); }
       if (active && active !== c) active.pause();
       active = c;
       const start = +b.dataset.start || 0;
@@ -1013,6 +1017,51 @@ function wireSnippets() {
       stopTimer = setTimeout(() => c.pause(), SNIP_SEC * 1000 + 1000);
     };
   });
+}
+
+// Voting listening party: plays each ballot card's own embed in order — no SDK,
+// no hidden player, no Spotify Connect takeover. The active card lights up and
+// its embed visibly plays, identically on every player's device.
+async function playBallot(ui) {
+  if (mix.running) return;
+  const items = (state.songs || []).filter((x) => x.track.id);
+  if (!items.length) return;
+  mix.running = true; mix.stop = false;
+  ui.playBtn.classList.add('hidden');
+  ui.stopBtn.classList.remove('hidden');
+  let current = null;
+  try {
+    for (let i = 0; i < items.length; i++) {
+      if (mix.stop || ballotDead) break;
+      const it = items[i];
+      // Card embeds build asynchronously — give this one a few seconds to appear.
+      for (let w = 0; w < 15 && !ballotCtls[it.sid] && !mix.stop && !ballotDead; w++) await waitMs(300);
+      const ctl = ballotCtls[it.sid];
+      if (!ctl || mix.stop) continue;
+      ui.highlight(it);
+      ui.status(`Now playing ${i + 1}/${items.length}: <b>${trackLabel(it.track)}</b>`);
+      const start = snippetStart(it.track);
+      current = ctl;
+      ctl.seek(start);
+      ctl.play();
+      if (start) setTimeout(() => { if (!mix.stop && current === ctl) ctl.seek(start); }, 900);
+      const t0 = Date.now();
+      const tick = setInterval(() => { if (ui.progress) ui.progress(Math.min(SNIP_SEC * 1000, Date.now() - t0), SNIP_SEC * 1000); }, 200);
+      await waitMs(SNIP_SEC * 1000);
+      clearInterval(tick);
+      if (current === ctl) ctl.pause();
+    }
+    ui.status(mix.stop ? 'Stopped.' : ballotDead ? 'Tap a player to listen — auto-play is blocked here.' : ui.doneMsg);
+  } catch (e) {
+    ui.status('Playback hiccup: ' + esc(e.message));
+  } finally {
+    mix.running = false;
+    try { if (current) current.pause(); } catch (_) {}
+    ui.highlight(null);
+    if (ui.progress) ui.progress(-1, 0);
+    ui.playBtn.classList.remove('hidden');
+    ui.stopBtn.classList.add('hidden');
+  }
 }
 
 function renderResults(s) {
