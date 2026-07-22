@@ -1147,9 +1147,9 @@ async function ensurePlaying(ctl, sid, start, cancelled) {
 // else keeps stealing the account's stream (Spotify allows ONE stream per
 // account — another tab, the desktop app, a phone), we say so instead of
 // ghosting through silent snippets.
-async function playBallot(ui) {
+async function playBallot(ui, itemsArg = null) {
   if (mix.running) return;
-  const items = (state.songs || []).filter((x) => x.track.id);
+  const items = (itemsArg || state.songs || []).filter((x) => x.track.id);
   if (!items.length) return;
   mix.running = true; mix.stop = false; mix.kind = 'ballot';
   ui.playBtn.classList.add('hidden');
@@ -1270,6 +1270,11 @@ function renderResults(s) {
           ? `<div class="win-banner">🏆 <b>${esc(s.winnerName)}</b> takes the round!${s.tieCount > 1 ? ' (random draw)' : ''}</div>`
           : `<div class="win-banner">🕵️ We have a winning song — but <b>whose is it?</b> Take your guesses!</div>`}
       ${s.you.isHost && !s.revealed ? '<p class="center"><button id="reveal-btn" class="btn primary">🎭 Reveal whose songs these are</button></p>' : ''}
+      <div class="row center-row">
+        <button id="win-play" class="btn small ghost">▶ Play the winning song</button>
+        <button id="win-stop" class="btn small ghost hidden">■ Stop</button>
+      </div>
+      <div id="win-status" class="cat-banner hidden"></div>
       <div id="ballot">
         ${sorted.map((song) => `
           <div class="song-card ${song.winner ? 'winner' : ''}" id="rsong-${esc(song.sid)}">
@@ -1302,32 +1307,38 @@ function renderResults(s) {
   autoPlayWinner(s); // results should SOUND like results
 }
 
-// The winning song starts playing by itself the moment results land — once per
-// round, only in a visible tab. Clip first (reliable everywhere), embed fallback.
-const winnerPlay = { round: 0 };
-async function autoPlayWinner(s) {
+// The winning song plays by itself the moment results land — through the exact
+// same engine as the voting party (SDK-first on the connected host, clips, embed
+// fallback), just with a one-song setlist. Same kick pattern too: wait for the
+// voting party to wind down, visible tabs only, once per round.
+const winnerPlay = { key: '' };
+function autoPlayWinner(s) {
   const win = (s.songs || []).find((x) => x.winner);
-  if (!win || !win.track.id || winnerPlay.round === s.round || document.hidden) return;
-  winnerPlay.round = s.round;
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const onResults = () => state && state.phase === 'results' && state.round === s.round;
-  const mark = (on) => { const c = $('#rsong-' + win.sid); if (c) c.classList.toggle('now', on); };
-  mark(true);
-  let ok = false;
-  if (win.track.previewUrl) ok = await playPreviewSnippet(win.track.previewUrl, { cancelled: () => !onResults() });
-  if (!ok && onResults()) {
-    for (let w = 0; w < 10 && !ballotCtls[win.sid] && onResults(); w++) await sleep(300);
-    const ctl = ballotCtls[win.sid];
-    if (ctl && onResults()) {
-      const start = snippetStart(win.track);
-      ctl.seek(start);
-      if (await ensurePlaying(ctl, win.sid, start, () => !onResults())) {
-        await sleep(SNIP_SEC * 1000);
-        ctl.pause();
-      }
-    }
-  }
-  mark(false);
+  if (!win || !win.track.id) return;
+  const ui = {
+    playBtn: $('#win-play'),
+    stopBtn: $('#win-stop'),
+    status: (h) => { const el = $('#win-status'); if (el) { el.classList.remove('hidden'); el.innerHTML = h; } },
+    highlight: (it) => {
+      document.querySelectorAll('#ballot .song-card').forEach((c) => c.classList.remove('now'));
+      if (it) { const c = $('#rsong-' + it.sid); if (c) c.classList.add('now'); }
+    },
+    progress: null,
+    doneMsg: '🏆 That was the winning song!',
+  };
+  ui.playBtn.onclick = () => playBallot(ui, [win]);
+  ui.stopBtn.onclick = stopSet;
+  const key = s.round + ':' + win.sid;
+  if (winnerPlay.key === key) return; // reveal re-render or replayed round — don't restart
+  let tries = 0;
+  const kick = () => {
+    if (!state || state.phase !== 'results' || state.round !== s.round) return;
+    if (document.hidden) return;
+    if (mix.running) { if (++tries < 8) setTimeout(kick, 700); return; } // voting party winding down
+    winnerPlay.key = key;
+    playBallot(ui, [win]);
+  };
+  setTimeout(kick, 1200);
 }
 
 // Count-up drama for point totals: lowest cards tick up first, the winner lands last
