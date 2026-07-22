@@ -1064,7 +1064,13 @@ function unlockAudio() {
   el.muted = true;
   el.src = SILENT_WAV;
   const p = el.play();
-  if (p && p.then) p.then(() => { unlockAudio.done = true; el.pause(); el.muted = false; }).catch(() => { el.muted = false; });
+  // The promise can resolve AFTER real playback has taken over the shared element
+  // (mobile resolves late) — only ever pause/unmute our own silent clip.
+  const own = () => (el.src || '').startsWith('data:');
+  if (p && p.then) {
+    p.then(() => { unlockAudio.done = true; if (own()) { el.pause(); el.muted = false; } })
+      .catch(() => { if (own()) el.muted = false; });
+  }
 }
 ['touchend', 'mousedown', 'keydown', 'click'].forEach((ev) => document.addEventListener(ev, unlockAudio, true));
 // Plays up to SNIP_SEC of the clip with soft edges. Resolves true if audio actually
@@ -1173,16 +1179,22 @@ async function playBallot(ui) {
         const tick = setInterval(() => { if (ui.progress) ui.progress(Math.min(SNIP_SEC * 1000, Date.now() - t0), SNIP_SEC * 1000); }, 200);
         let err = false;
         try { await sdkPlaySnippet(it.track); sdkFails = 0; } catch (_) { err = true; } finally { clearInterval(tick); }
-        if (err && ++sdkFails >= 2) { sdkOk = false; started--; i--; } // SDK died — retry via clip/embed
+        if (err) {
+          started--;
+          resetMixPlayer();
+          sdkOk = await initMixPlayer().catch(() => false); // stale device: one reconnect
+          if (sdkOk && ++sdkFails >= 2) sdkOk = false; // keeps failing: clips take over
+          i--; // replay this song on whichever player is now active
+        }
         continue;
       }
 
       // Preview clip: reliable plain audio, same on every device.
       if (it.track.previewUrl) {
-        const ok = await playPreviewSnippet(it.track.previewUrl, {
-          cancelled: () => mix.stop,
-          onTick: (p, t) => { if (ui.progress) ui.progress(p, t); },
-        });
+        const opts = { cancelled: () => mix.stop, onTick: (p, t) => { if (ui.progress) ui.progress(p, t); } };
+        let ok = await playPreviewSnippet(it.track.previewUrl, opts);
+        // First clip can lose the race with the mobile unlock ritual — try once more.
+        if (!ok && !mix.stop) ok = await playPreviewSnippet(it.track.previewUrl, opts);
         if (ok) { started++; continue; }
         if (mix.stop) break;
         // clip blocked or dead — fall through to the embed
@@ -1513,9 +1525,20 @@ async function playSet(items, ui) {
         if (ui.progress) ui.progress(Math.min(SNIP_SEC * 1000, Date.now() - t0), SNIP_SEC * 1000);
       }, 200);
       try {
-        if (sdkOk) await sdkPlaySnippet(it.track);
-        else if (!(it.track.previewUrl && await playPreviewSnippet(it.track.previewUrl, { cancelled: () => mix.stop }))) {
-          await embedPlaySnippet(it.track, ui.embedSlot());
+        let played = false;
+        if (sdkOk) {
+          try { await sdkPlaySnippet(it.track); played = true; }
+          catch (_) {
+            // Spotify expires idle SDK devices (the /play then 404s) — reconnect once.
+            resetMixPlayer();
+            sdkOk = await initMixPlayer().catch(() => false);
+            if (sdkOk) { try { await sdkPlaySnippet(it.track); played = true; } catch (_) { sdkOk = false; } }
+          }
+        }
+        if (!played && !mix.stop) {
+          if (!(it.track.previewUrl && await playPreviewSnippet(it.track.previewUrl, { cancelled: () => mix.stop }))) {
+            await embedPlaySnippet(it.track, ui.embedSlot());
+          }
         }
       } finally { clearInterval(tick); }
     }
@@ -1533,6 +1556,12 @@ async function playSet(items, ui) {
 }
 
 // --- SDK path: full tracks + real volume fades (needs Premium + streaming scope) ---
+// Drops a dead SDK connection so initMixPlayer can build a fresh device.
+function resetMixPlayer() {
+  try { if (mix.player) mix.player.disconnect(); } catch (_) {}
+  mix.player = null;
+  mix.deviceId = null;
+}
 function initMixPlayer() {
   return new Promise((resolve, reject) => {
     if (mix.player && mix.deviceId) return resolve(true);
